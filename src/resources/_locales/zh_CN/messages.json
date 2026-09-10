@@ -1,0 +1,70 @@
+{
+    "extension_name": {
+        "message": "DomA - 对话即操作，你的浏览器智能体",
+        "description": ""
+    },
+    "extension_name_browser": {
+        "message": "DomA - 对话即操作，你的浏览器智能体",
+        "description": ""
+    },
+    "extension_description": {
+        "message": "面向浏览器的 AI 自动化智能体，将复杂操作流程简化为一次次的对话。",
+        "description": ""
+    },
+    "extension_description_browser": {
+        "message": "面向浏览器的 AI 自动化智能体，将复杂操作流程简化为一次次的对话。",
+        "description": ""
+    },
+    "extension_lite_name": {
+        "message": "Doma移动版 - AI自动化浏览",
+        "description": ""
+    },
+    "extension_lite_description": {
+        "message": "网页自动化、AI 代理、智能执行、流程自动化浏览",
+        "description": ""
+    },
+    "installScriptConfirm":{
+        "message": "你希望通过Doma来安装该脚本吗？",
+        "description": ""
+    },
+    "install": {
+        "message": "安装",
+        "description": ""
+    },
+    "userscriptInstalling": {
+        "message": "正在安装 $1…",
+        "description": ""
+    },
+    "userscriptInstallingGeneric": {
+        "message": "正在安装用户脚本…",
+        "description": ""
+    },
+    "userscriptDownloading": {
+        "message": "正在下载 $1…",
+        "description": ""
+    },
+    "userscriptDownloadingGeneric": {
+        "message": "正在下载…",
+        "description": ""
+    },
+    "userscriptInstallFailed": {
+        "message": "$1 安装失败",
+        "description": ""
+    },
+    "userscriptInstallFailedGeneric": {
+        "message": "安装失败",
+        "description": ""
+    },
+    "userscriptInstalled": {
+        "message": "$1 已安装",
+        "description": ""
+    },
+    "userscriptInstalledGeneric": {
+        "message": "安装完成",
+        "description": ""
+    },
+    "userscriptUnknownError": {
+        "message": "未知错误",
+        "description": ""
+    }
+}

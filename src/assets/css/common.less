@@ -1,0 +1,155 @@
+body,
+div,
+span,
+header,
+footer,
+nav,
+section,
+aside,
+article,
+ul,
+dl,
+dt,
+cite,
+dd,
+li,
+a,
+p,
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+i,
+b,
+textarea,
+button,
+input,
+select,
+figure,
+figcaption {
+  padding: 0;
+  margin: 0;
+  list-style: none;
+  font-style: normal;
+  text-decoration: none;
+  border: none;
+  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none; 
+  -webkit-font-smoothing: antialiased;
+  -webkit-box-sizing: border-box;
+  -moz-box-sizing: border-box;
+  box-sizing: border-box;
+  &:focus {
+    outline: none;
+  }
+}
+html { 
+  -ms-text-size-adjust: 100%; -webkit-text-size-adjust: 100%;height: 100%;
+  touch-action: manipulation; /* 禁止双击缩放、双指缩放 */
+}
+/* 移动端点击高亮 */
+body {
+  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
+  background-color: var(--stay-background);
+  color: var(--stay-black);
+  -webkit-tap-highlight-color: rgba(0, 0, 0, 0);
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  line-height: 1.5;
+  font-weight: 400;
+  touch-action: manipulation; /* 禁止双击缩放、双指缩放 */
+}
+em, i { font-style: normal;}
+img,button{ border:0; outline: 0;}
+header,section,footer{  display: block; }
+button {
+  border: none;
+  outline: none;
+}
+a {
+  text-decoration: none;
+  color: var(--stay-fontlink);
+}
+li {
+  list-style-type: none;
+}
+img{
+  -ms-interpolation-mode: nearest-neighbor; 
+  object-fit: contain;
+}
+
+.flex-center{
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+::-webkit-scrollbar{
+	display:none;
+}
+
+#app {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  // text-align: center;
+  height: auto !important;
+}
+
+
+
+/* 在 MobileUserscripts.vue 文件或全局样式中添加以下 CSS */
+/* 防止 iOS Safari 聚焦时放大 */
+@media screen and (-webkit-min-device-pixel-ratio: 0) {
+  /* 针对所有输入元素 */
+  input:focus,
+  textarea:focus,
+  select:focus {
+    /* 移除黑色边框（实际上是内部阴影） */
+    -webkit-appearance: none;
+    /* 自定义聚焦样式 */
+    outline: none;
+    border: none; /* 可根据设计调整边框颜色 */
+    /* border-radius: 4px;  */
+  }
+}
+
+/* 针对 iOS Safari 特定修复 */
+input,
+textarea,
+select {
+  /* 防止点击输入框时页面缩放 */
+  /* iOS Safari 要求至少 16px 才不会放大 */
+  /* font-size: 16px;  */
+  /* 重置默认外观 */
+  -webkit-appearance: none;
+  appearance: none;
+  /* 移除内阴影 */
+  -webkit-box-shadow: none;
+  box-shadow: none;
+}
+
+/* 如果需要更精确地针对 iOS 设备 */
+@supports (-webkit-touch-callout: none) {
+  input:focus,
+  textarea:focus,
+  select:focus {
+    /* iOS 设备特定的聚焦样式 */
+    outline: none;
+    border-color: none; /* iOS 蓝，可自定义 */
+    -webkit-tap-highlight-color: rgba(0, 0, 0, 0);
+  }
+}
+
+/* 针对 MobileUserscripts.vue 中的 .action-buttons 内的输入元素 */
+.action-buttons input:focus,
+.action-buttons textarea:focus,
+.action-buttons select:focus {
+  /* 可以为特定容器内的输入元素添加更具体的样式 */
+  outline: none;
+  border-color: none; /* 示例颜色 */
+}

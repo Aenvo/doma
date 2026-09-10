@@ -1,0 +1,40 @@
+{
+    "name": "__MSG_extension_name__",
+    "version": "1.0.0",
+    "description": "__MSG_extension_description__",
+    "manifest_version": 3,
+    "default_locale": "en",
+    "icons": {
+        "48": "extension-img/icon-48-chrome.png",
+        "96": "extension-img/icon-96-chrome.png",
+        "128": "extension-img/icon-128-chrome.png",
+        "256": "extension-img/icon-256-chrome.png",
+        "512": "extension-img/icon-512-chrome.png"
+    },
+    "host_permissions": [
+        "<all_urls>"
+    ],
+    "background": {
+        "service_worker": "source/service-worker.js"
+    },
+    "content_scripts": [],
+    "action": {
+        "default_popup": "popup.html"
+    },
+    "options_page": "options.html",
+    "content_security_policy": {
+        "extension_pages": "script-src 'self'; object-src 'self';",
+        "sandbox": "sandbox allow-scripts allow-forms allow-popups allow-modals; script-src 'self' 'unsafe-inline' 'unsafe-eval'; child-src 'self';"
+    },
+    "permissions": [
+        "activeTab",
+        "clipboardWrite",
+        "declarativeNetRequest",
+        "declarativeNetRequestWithHostAccess",
+        "nativeMessaging",
+        "storage",
+        "tabs",
+        "unlimitedStorage",
+        "webNavigation"
+    ]
+}

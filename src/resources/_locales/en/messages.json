@@ -1,0 +1,70 @@
+{
+    "extension_name": {
+        "message": "DomA - Conversation is action, Your browser agent",
+        "description": ""
+    },
+    "extension_name_browser": {
+        "message": "DomA - Conversation is action, Your browser agent",
+        "description": ""
+    },
+    "extension_description": {
+        "message": "An AI automation agent for the browser—complex workflows, one conversation at a time.",
+        "description": ""
+    },
+    "extension_description_browser": {
+        "message": "An AI automation agent for the browser—complex workflows, one conversation at a time.",
+        "description": ""
+    },
+    "extension_lite_name": {
+        "message": "Doma for Mobile - AI Automation Browser",
+        "description": ""
+    },
+    "extension_lite_description": {
+        "message": "Mobile optimized, Support Userscripts, Video Downloader (M3U8/HLS included), Bookmarks Sync, Tag Ads, Dark Mode…",
+        "description": ""
+    },
+    "installScriptConfirm":{
+        "message": "Are you sure you want to install this userscript with Doma?",
+        "description": ""
+    },
+    "install": {
+        "message": "Install",
+        "description": ""
+    },
+    "userscriptInstalling": {
+        "message": "Installing $1…",
+        "description": ""
+    },
+    "userscriptInstallingGeneric": {
+        "message": "Installing user script…",
+        "description": ""
+    },
+    "userscriptDownloading": {
+        "message": "Downloading $1…",
+        "description": ""
+    },
+    "userscriptDownloadingGeneric": {
+        "message": "Downloading…",
+        "description": ""
+    },
+    "userscriptInstallFailed": {
+        "message": "$1 installation failed",
+        "description": ""
+    },
+    "userscriptInstallFailedGeneric": {
+        "message": "Installation failed",
+        "description": ""
+    },
+    "userscriptInstalled": {
+        "message": "$1 installed",
+        "description": ""
+    },
+    "userscriptInstalledGeneric": {
+        "message": "Installation complete",
+        "description": ""
+    },
+    "userscriptUnknownError": {
+        "message": "Unknown error",
+        "description": ""
+    }
+}

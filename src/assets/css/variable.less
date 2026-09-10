@@ -1,0 +1,87 @@
+:root {
+  color-scheme: light dark;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  --stay-text-large: 20px; 
+  --stay-text-headline: 17px; 
+  --stay-text-subheadline: 15px; 
+  --stay-text-body: 14px;
+  --stay-text-subbody: 13px; 
+  --stay-text-footnote: 12px; 
+  --stay-text-subfootnote: 10px;
+  --stay-white: #FFFFFF;
+  --s-main: #b620e0;
+  --s-main-f10: rgba(182, 32, 224, 0.1);
+  --stay-proBorder: #E7CA7C;
+  --stay-proBackground: #F9DF8D;
+  --stay-pro: #84551D;
+  --stay-fontlink: #333333;
+  --stay-black: #2F3134;
+  --stay-secondaryFont: #8A8A8A;
+  --stay-primary: #2F3134;
+  /* 侧栏 DomA 标；Open 版仅改 logo 色，不改行动按钮用的 --stay-primary */
+  --stay-logo: var(--stay-black);
+  // --color-font-3: #1F1F1F;
+  --stay-backgroundMask: rgba(0, 0, 0, 0.35);
+  --stay-gray: #909090;
+  --stay-error: #FF4D4F;
+  --stay-notice: #F81948;
+  --stay-loading: #f8f8f8;
+  --stay-placeholder: #8A8A8A;
+  --stay-background: #f8f8f6;
+  --stay-backgroundTertiary: #eeeeee;
+  --stay-backgroundSecondary: #ffffff;
+  --stay-border:#e0e0e0;
+  --stay-border-drop: rgba(224,224,224,0.5);
+  --stay-backgroundSecondary-drop: rgba(255,255,255,0.3);
+  --stay-disabled-text: #b0b0b0; // 更浅的灰
+  --stay-blur-color: rgba(248,248,248,0.85);
+  --stay-blue: #337BF6;
+  --stay-wechat: #09B907;
+  /* command chip：等价于 rgba(54, 116, 240, 0.1) 叠在白底上，不透明 */
+  --stay-commandChipBg: #ebf1fe;
+  --stay-commandChipBorder: #3674f0;
+  --stay-commandChipText: #3674f0;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --stay-loading: #f7f7f7;
+    --stay-black: #DCDCDC;
+    --stay-backgroundSecondary: #1c1c1c;
+    --stay-secondaryFont: #6f6f6f;
+    --stay-background: #131313;
+    --stay-fontlink: #DCDCDC;
+    --stay-border: #37372F;
+    --stay-placeholder: #C0C0C0;
+    --stay-backgroundTertiary: #202020;
+    --stay-disabled-text: #777777;
+    --stay-border-drop: rgba(55, 55, 47, 0.5);
+    --stay-backgroundSecondary-drop: rgba(28,28,28, 0.3);
+    --stay-blur-color: #131313;
+    --stay-blue: #337AF6;
+    --stay-primary: #2F3134;
+    --stay-commandChipBg: #1f2531;
+    --stay-commandChipBorder: #3674f0;
+    --stay-commandChipText: #3674f0;
+  }
+  
+}
+
+/* Open：logo 青蓝；按钮主色仍用 --stay-primary。apply:pro 后 Vite 会把 @edition 改成 pro。 */
+@edition: open;
+
+& when (@edition = open) {
+  :root {
+    --stay-logo: #0d9488;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --stay-logo: #2dd4bf;
+    }
+  }
+}
+

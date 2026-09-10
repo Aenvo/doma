@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "doma": {
+      "command": "python3",
+      "args": [
+        "/Users/ris/Desktop/extension/mcp-bridge/doma_mcp_stdio.py"
+      ]
+    }
+  }
+}

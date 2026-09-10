@@ -1,0 +1,25 @@
+node_modules
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+.cursor/
+.env
+.env.*
+!.env.example
+!.env.desktop-open
+.playwright-mcp/
+tmp/
+releases/
+*.log
+# Local signing keys only — never publish this directory
+/keys/
+
+# Maintainer-only notes (not for public tree)
+/CONTEXT.md
+
+# Private Pro overlay (clone separately; never publish)
+/pro/
+/undefined/
+# Local apply:pro artifacts (do not commit)
+/packages/pro/

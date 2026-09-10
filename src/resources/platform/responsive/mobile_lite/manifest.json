@@ -1,0 +1,173 @@
+{
+    "name": "__MSG_extension_lite_name__",
+    "version": "1.0.2",
+    "description": "__MSG_extension_lite_description__",
+    "manifest_version": 3,
+    "build": "238",
+    "copyright": "Stay Browser",
+    "default_locale": "en",
+    "edge_lite": true,
+    "icons": {
+        "48": "extension-img/icon-48-chrome.png",
+        "96": "extension-img/icon-96-chrome.png",
+        "128": "extension-img/icon-128-chrome.png",
+        "256": "extension-img/icon-256-chrome.png"
+    },
+    "host_permissions": [
+        "<all_urls>"
+    ],
+    "background": {
+        "service_worker": "service/service-worker.js"
+    },
+    "content_scripts": [
+        {
+            "js": [
+                "source/inject/tag.js"
+            ],
+            "matches": [
+                "<all_urls>"
+            ],
+            "all_frames": true,
+            "run_at": "document_start"
+        },
+        {
+            "js": [
+                "source/inject/observer.js"
+            ],
+            "matches": [
+                "<all_urls>"
+            ],
+            "all_frames": false,
+            "run_at": "document_start"
+        },
+        {
+            "js": [
+                "source/dark/fallback.js",
+                "source/dark/dark.config.js",
+                "source/dark/dark.user.js"
+            ],
+            "matches": [
+                "<all_urls>"
+            ],
+            "all_frames": true,
+            "run_at": "document_start"
+        },
+        {
+            "matches": [
+                "<all_urls>"
+            ],
+            "js": [
+                "source/dark/proxy.js"
+            ],
+            "run_at": "document_start",
+            "all_frames": true,
+            "match_about_blank": true,
+            "world": "MAIN"
+        },
+        {
+            "js": [
+                "source/lib/jszip.min.js"
+            ],
+            "matches": [
+                "<all_urls>"
+            ],
+            "all_frames": false,
+            "run_at": "document_start"
+        },
+        {
+            "js": [
+                "source/downloader/file/parse.file.js"
+            ],
+            "matches": [
+                "<all_urls>"
+            ],
+            "all_frames": true,
+            "run_at": "document_start"
+        },
+        {
+            "js": [
+                "source/downloader/image/parse.image.js"
+            ],
+            "matches": [
+                "<all_urls>"
+            ],
+            "all_frames": true,
+            "run_at": "document_start"
+        },
+        {
+            "js": [
+                "source/blocker/adblocker.user.js"
+            ],
+            "matches": [
+                "<all_urls>"
+            ],
+            "all_frames": true,
+            "run_at": "document_start"
+        },
+        {
+            "js": [
+                "source/downloader/video/find.video.js"
+            ],
+            "matches": [
+                "<all_urls>"
+            ],
+            "all_frames": true,
+            "run_at": "document_start"
+        },
+        {
+            "js": [
+                "source/inject/miniapp.js"
+            ],
+            "matches": [
+                "<all_urls>"
+            ],
+            "all_frames": false,
+            "run_at": "document_start"
+        },
+        {
+            "js": [
+                "source/inject/meta.user.js"
+            ],
+            "matches": [
+                "<all_urls>"
+            ],
+            "all_frames": false,
+            "run_at": "document_start"
+        }
+    ],
+    "action": {
+        "default_popup": "popup/index.html#popup",
+        "width": "360"
+    },
+    "options_page": "options/index.html",
+    "web_accessible_resources": [
+        {
+            "resources": [
+                "assets/*",
+                "source/*"
+            ],
+            "matches": [
+                "<all_urls>"
+            ]
+        }
+    ],
+    "content_security_policy": {
+        "extension_pages": "script-src 'self'; object-src 'self';",
+        "sandbox": "sandbox allow-scripts allow-forms allow-popups allow-modals; script-src 'self' 'unsafe-inline' 'unsafe-eval'; child-src 'self';"
+    },
+    "permissions": [
+        "<all_urls>",
+        "activeTab",
+        "storage",
+        "alarms",
+        "tabs",
+        "unlimitedStorage",
+        "webNavigation",
+        "userScripts",
+        "downloads",
+        "cookies",
+        "windows",
+        "declarativeNetRequest",
+        "declarativeNetRequestWithHostAccess"
+    ]
+}

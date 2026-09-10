@@ -1,0 +1,38 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "lib": ["DOM", "ESNext", "WebWorker"],
+    "skipLibCheck": true,
+    "importHelpers": true,
+    "moduleResolution": "bundler",
+    "esModuleInterop": true,       // 允许兼容性导入    
+    "allowJs": true,
+    "checkJs": false,
+    /* Bundler mode */
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "typeRoots": ["./src/types", "./node_modules/@types"],
+    /* Linting */
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]            // ✅ 这行是关键，不能写 ./src/*
+    }
+  },
+  "include": [
+    "vite.config.ts",
+    "src/**/*.ts",
+    "src/**/*.d.ts",
+    "vite.comp.config.ts",
+    "inline-builder.ts",
+    "src/**/*.vue"               // 添加 Vue 文件支持，解决找不到 AppManage.vue 的问题
+  ],
+  "exclude": ["src/**/*.vue"]
+}
+  

@@ -1,0 +1,9 @@
+<svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+    <!-- 下载箭头 -->
+    <path d="M10 3.1V11.0" stroke-width="1.9" />
+    <path d="M7.1 9.1L10 12.0L12.9 9.1" stroke-width="1.9" />
+    <!-- 底部横线：比箭头稍粗但不过重 -->
+    <path d="M4.0 15.6H16.0" stroke-width="2.2" />
+  </g>
+</svg>
