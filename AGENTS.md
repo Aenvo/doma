@@ -153,3 +153,4 @@ If it can avoid `ChatPanel.vue`, avoid it.
 - Explain **why**, especially for session and tool-contract changes  
 - Tool PRs should show definition + handler (+ prompt if claims changed) stay aligned  
 - If you touch `loadConversation` / `onActivated` / drafts, note which lesson in `conversationSwitch.record.md` you followed  
+- **Agent commits** use author `BTF Dev Robot <tigris.shin2@gmail.com>` via `--author` only (see `.cursor/rules/git-commit-author.mdc`); never rewrite the human’s `git config`  
