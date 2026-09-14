@@ -154,6 +154,10 @@ import { getContext } from "@/services/Context";
 import { isBuiltinNewTabOrStartPageUrl } from "@/services/chat/browserTools";
 import { stripUserPromptMarkersForDisplay } from "@/components/chat/chatTypes";
 import ChatChevronUpSvg from "@/assets/images/chat-chevron-up.svg";
+import {
+  getActiveBrowserTabSync,
+  subscribeActiveTabChanges,
+} from "@/edition/activeBrowserTab";
 
 const { t } = useI18n();
 
@@ -188,10 +192,15 @@ const currentTabUrl = ref("");
 const currentTabIcon = ref("");
 
 let refreshDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-let onActivatedListener: ((info: { tabId: number; windowId: number }) => void) | null = null;
-let onUpdatedListener: ((tabId: number, changeInfo: unknown, tab: unknown) => void) | null = null;
+let unsubscribeActiveTabChanges: (() => void) | null = null;
 
 async function refreshCurrentTabInfo(): Promise<void> {
+  const host = getActiveBrowserTabSync();
+  if (host?.url || host?.id != null) {
+    currentTabUrl.value = host.url || "";
+    currentTabIcon.value = host.favIconUrl || "";
+    return;
+  }
   try {
     const browser = getContext().browser;
     const tabs = await new Promise<any[]>((resolve) => {
@@ -369,15 +378,9 @@ function closeConversation(id: string) {
 
 onMounted(() => {
   void refreshCurrentTabInfo();
-  const browser = getContext().browser;
-  onActivatedListener = () => {
-    void refreshCurrentTabInfo();
-  };
-  onUpdatedListener = () => {
+  unsubscribeActiveTabChanges = subscribeActiveTabChanges(() => {
     scheduleRefreshCurrentTabInfo();
-  };
-  browser.tabs.onActivated.addListener(onActivatedListener);
-  browser.tabs.onUpdated.addListener(onUpdatedListener);
+  });
 });
 
 onUnmounted(() => {
@@ -385,22 +388,13 @@ onUnmounted(() => {
     clearTimeout(refreshDebounceTimer);
     refreshDebounceTimer = null;
   }
-  const browser = getContext().browser;
-  if (onActivatedListener) {
+  if (unsubscribeActiveTabChanges) {
     try {
-      browser.tabs.onActivated.removeListener(onActivatedListener);
+      unsubscribeActiveTabChanges();
     } catch {
       // ignore
     }
-    onActivatedListener = null;
-  }
-  if (onUpdatedListener) {
-    try {
-      browser.tabs.onUpdated.removeListener(onUpdatedListener);
-    } catch {
-      // ignore
-    }
-    onUpdatedListener = null;
+    unsubscribeActiveTabChanges = null;
   }
 });
 </script>

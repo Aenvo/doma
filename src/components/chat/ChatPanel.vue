@@ -1038,6 +1038,20 @@ import {
   startActiveTabRecording,
   stopActiveTabRecordingAndDownload,
 } from "@/services/chat/tabRecording";
+import {
+  initActiveBrowserTabTracking,
+  isSafariSidePanelShell,
+  resolveActiveBrowserTab,
+} from "@/edition/activeBrowserTab";
+
+/** Safari 页内壳：禁 tabs/windows；宿主 tab 由 edition(pro) + panelShell 注入 */
+const IS_SAFARI_EXT = isSafariSidePanelShell();
+
+if (IS_SAFARI_EXT) {
+  initActiveBrowserTabTracking((tab) => {
+    console.log("[ChatPanel] safari host tab", tab);
+  });
+}
 
 const { t, locale } = useI18n();
 
@@ -2472,6 +2486,11 @@ let chatPanelWindowId: number | undefined;
 
 async function ensureChatPanelWindowId(): Promise<number | undefined> {
   if (chatPanelWindowId != null) return chatPanelWindowId;
+  // Safari（尤其页内 iframe 侧栏）：windows.getCurrent 曾触发 WebContent 崩溃
+  if (IS_SAFARI_EXT) {
+    console.log("[ChatPanel] safari skip windows.getCurrent");
+    return undefined;
+  }
   try {
     chatPanelWindowId = await getCurrentWindowId();
   } catch (e) {
@@ -4112,11 +4131,17 @@ const onKeydownChange = (e: KeyboardEvent) => {
 };
 
 onMounted(() => {
+  console.log("[ChatPanel] mount-1 begin", { safari: IS_SAFARI_EXT });
   exitInlineBubbleEdit();
   addRuntimeListener();
   document.addEventListener("keydown", onKeydownChange, true);
-  setupUserBubbleMinimapObserver();
-  void nextTick(() => scheduleUserBubbleMinimapLayout());
+  // Safari：minimap MutationObserver 曾与重模板叠加触发 WebContent 崩溃
+  if (!IS_SAFARI_EXT) {
+    setupUserBubbleMinimapObserver();
+    void nextTick(() => scheduleUserBubbleMinimapLayout());
+  } else {
+    console.log("[ChatPanel] safari skip minimap observer");
+  }
 });
 
 const displayMessages = computed<DisplayItem[]>(() => {
@@ -4204,7 +4229,7 @@ function scrollToBottom(smooth = false) {
 async function scrollToBottomAfterUpdate(smooth = false) {
   await nextTick();
   scrollToBottom(smooth);
-  scheduleUserBubbleMinimapLayout();
+  if (!IS_SAFARI_EXT) scheduleUserBubbleMinimapLayout();
 }
 
 watch(loading, () => {
@@ -4218,6 +4243,8 @@ watch(thinking, () => {
 watch(
   displayMessages,
   () => {
+    // Safari：首屏 post-flush 里 hydrate/minimap 与重模板叠加时易打挂 WebContent
+    if (IS_SAFARI_EXT) return;
     void nextTick(() => {
       hydrateBubbleFileThumbnails(messagesEl.value);
       hydrateBubbleChipFavicons(messagesEl.value);
@@ -4228,12 +4255,14 @@ watch(
 );
 
 watch(messagesEl, (el, prev) => {
+  if (IS_SAFARI_EXT) return;
   if (!userBubbleMinimapResizeObserver) return;
   if (prev) userBubbleMinimapResizeObserver.unobserve(prev);
   if (el) userBubbleMinimapResizeObserver.observe(el);
 });
 
 watch(userBubbleMinimapEl, (el, prev) => {
+  if (IS_SAFARI_EXT) return;
   if (!userBubbleMinimapResizeObserver) return;
   if (prev) userBubbleMinimapResizeObserver.unobserve(prev);
   if (el) userBubbleMinimapResizeObserver.observe(el);
@@ -4277,7 +4306,7 @@ async function abortTask() {
 }
 
 onMounted(async () => {
-  console.log("[ChatPanel] mounted, start load");
+  console.log("[ChatPanel] mount-2 begin", { safari: IS_SAFARI_EXT });
   registerChatPanelSlotsHost({
     closeSharedPanels: closeSharedHeaderPanels,
     afterLogin: () => {
@@ -4293,13 +4322,29 @@ onMounted(async () => {
     },
   });
   await loadConfig();
+  console.log("[ChatPanel] loadConfig done");
   await ensureChatPanelWindowId();
   addListener();
-  addTabListeners();
+  if (!IS_SAFARI_EXT) {
+    addTabListeners();
+  } else {
+    console.log("[ChatPanel] safari skip addTabListeners");
+  }
   // 先让首屏渲染完成，再加载历史会话/标签页信息（避免首屏被大量消息/Markdown 渲染拖慢）
   await nextTick();
   await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-  await loadBoundConversation();
+  console.log("[ChatPanel] first paint tick done");
+
+  if (IS_SAFARI_EXT) {
+    // hostTab 已由 panelShell 注入；略延迟绑会话，避开首屏压力
+    window.setTimeout(() => {
+      console.log("[ChatPanel] safari delayed loadBoundConversation");
+      void loadBoundConversation();
+    }, 400);
+  } else {
+    await loadBoundConversation();
+  }
+
   chatPanelReadyForMcp = true;
   flushMcpExternalTaskQueue();
   isTabRecording.value = isTabRecordingActive();
@@ -4307,13 +4352,24 @@ onMounted(async () => {
   try {
     mcpBridgeEnabled.value = await isMcpBridgeEnabled();
     cliBridgeEnabled.value = await isCliBridgeEnabled();
-    syncMcpBridgeListening();
+    if (!IS_SAFARI_EXT) {
+      syncMcpBridgeListening();
+    } else {
+      console.log("[ChatPanel] safari skip syncMcpBridgeListening (defer)");
+      window.setTimeout(() => {
+        try {
+          syncMcpBridgeListening();
+        } catch (e) {
+          console.warn("[ChatPanel] safari late mcp bridge", e);
+        }
+      }, 800);
+    }
   } catch (e) {
     console.warn("[ChatPanel] load bridge enabled failed", e);
   }
   try {
     // Open 无账户/下载器等 Pro 工具栏项，不做 header 新手引导
-    if (!isOpenEdition()) {
+    if (!isOpenEdition() && !IS_SAFARI_EXT) {
       const done = await isOnboardingDone();
       if (!done) {
         await nextTick();
@@ -5065,23 +5121,26 @@ async function toggleHistoryPanel() {
 }
 
 async function getBoundConversationId() {
-  const w = await getContext().browser.windows.getLastFocused({ populate: true });
-  const currentTab = w.tabs?.find((t:any) => t.active);
-  const conversationId = await getConversationIdByTabId(currentTab.id);
-  return conversationId;
+  const currentTab = await resolveActiveBrowserTab();
+  if (currentTab?.id == null) {
+    if (IS_SAFARI_EXT) {
+      console.log("[ChatPanel] safari getBoundConversationId: no hostTab yet");
+    }
+    return undefined;
+  }
+  return await getConversationIdByTabId(currentTab.id);
 }
 
 async function loadBoundConversation() {
-  try{
+  try {
     await chatStorage.init();
     await awaitConversationContextPersistenceReady(replaceConversationMapsFromPersisted);
     await refreshConversationContextList();
     conversationId.value = await getBoundConversationId();
-    loadConversation(conversationId.value, "loadBoundConversation");
-  }catch(e){
-    console.error('[Chat] Failed to load bound conversation:', e);
+    await loadConversation(conversationId.value, "loadBoundConversation");
+  } catch (e) {
+    console.error("[Chat] Failed to load bound conversation:", e);
   }
-  
 }
 
 async function refreshConversationContextList() {
@@ -6096,12 +6155,16 @@ async function handleUserscriptInstall(
 }
 
 /** 发送瞬间：浏览器当前激活标签页名片（写入 memoryHooks → interactionBlock） */
+async function resolveActiveBrowserTabLite(): Promise<
+  | { id?: number; title?: string; url?: string; favIconUrl?: string }
+  | undefined
+> {
+  return resolveActiveBrowserTab();
+}
+
 async function resolveActiveTabSnapshot(): Promise<ActiveTabContext | undefined> {
   try {
-    const w = await getContext().browser.windows.getLastFocused({ populate: true });
-    const currentTab = w.tabs?.find((t: { active?: boolean }) => t.active) as
-      | { id?: number; title?: string; url?: string; favIconUrl?: string }
-      | undefined;
+    const currentTab = await resolveActiveBrowserTabLite();
     if (currentTab) {
       const tabId = typeof currentTab.id === "number" && currentTab.id > 0 ? currentTab.id : undefined;
       const title = typeof currentTab.title === "string" ? currentTab.title.trim() : "";
@@ -6127,8 +6190,7 @@ async function resolveActiveTabSnapshot(): Promise<ActiveTabContext | undefined>
 
 async function resolveCurrentConversationUrl(): Promise<string> {
   try {
-    const w = await getContext().browser.windows.getLastFocused({ populate: true });
-    const currentTab = w.tabs?.find((t: any) => t.active);
+    const currentTab = await resolveActiveBrowserTabLite();
     const url = typeof currentTab?.url === "string" ? currentTab.url.trim() : "";
     if (url) return url;
   } catch {
@@ -6143,8 +6205,7 @@ async function resolveCurrentConversationHost(): Promise<string> {
 }
 
 async function createSingleConversation(conversationId: string, question: string) {
-  const w = await getContext().browser.windows.getLastFocused({ populate: true });
-  const currentTab = w.tabs?.find((t: { active?: boolean }) => t.active);
+  const currentTab = await resolveActiveBrowserTabLite();
   upsertConversationContext({
     conversationId,
     lastUserQuestion: question,

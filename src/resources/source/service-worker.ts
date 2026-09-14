@@ -22,6 +22,9 @@ import {
   registerEditionEarly,
   initEditionBackground,
   registerEditionTabListeners,
+  configureGlobalSidePanel,
+  registerNativeSidePanelListeners,
+  handleBrowserActionClicked,
 } from "@/edition/editionSwHooks";
 
 /** 工具结果经 JSON 往返再 sendResponse，避免含不可克隆字段时抛错 → 前端收不到 success。 */
@@ -39,7 +42,6 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { ExtensionServerTransport } from "@/services/mcp/extensionTransport";
 import { getConversationContext, getConversationIdByTabId, removeConversationByGroupId, removeConversationByTabId } from "@/services/chat/conversationContextStore";
 import { StayWebExtensionHandler } from "@/services/extension/StayWebExtensionHandler";
-const SIDE_PANEL_PATH = "popup/index.html#sidepannel";
 
 class Background{
     showSidePanel: boolean = false;
@@ -61,12 +63,7 @@ class Background{
 
     /** 窗口级侧栏：不按 tabId 绑定，避免每 tab 一份 ChatPanel 实例 */
     private async setGlobalSidePanelEnabled(enabled: boolean): Promise<void> {
-      const browser = getContext().browser as any;
-      if (!browser.sidePanel?.setOptions) return;
-      await browser.sidePanel.setOptions({
-        path: SIDE_PANEL_PATH,
-        enabled,
-      });
+      await configureGlobalSidePanel(enabled);
     }
 
     private async registerConversationHooks() {
@@ -123,6 +120,9 @@ class Background{
     listener(request: any, sender: any, sendResponse: (response: any)=> void){
       console.log("receive message-----",request,sender);
       const {origin, operate} = request;
+      if (tryHandleEditionSwMessage(request, sender, sendResponse)) {
+        return true;
+      }
       if (operate.startsWith('background')){
         if (origin === 'content'){
           if (operate.startsWith('background/v3/gmapi')){
@@ -586,37 +586,24 @@ class Background{
 
       getContext().browser.action.onClicked.addListener((tab: any) => {
         console.log("panel----", this.showSidePanel);
-        const browser = getContext().browser as any;
-        if (!browser.sidePanel?.setOptions) return;
-        if (this.showSidePanel) {
-          browser.sidePanel.setOptions({
-            path: SIDE_PANEL_PATH,
-            enabled: false,
-          });
-          this.showSidePanel = false;
-          void Storage.init().set("doma_agent_side_pannel_status", false);
-        } else {
-          browser.sidePanel.setOptions({
-            path: SIDE_PANEL_PATH,
-            enabled: true,
-          });
-          const windowId = tab?.windowId;
-          if (windowId != null && browser.sidePanel.open) {
-            void browser.sidePanel.open({ windowId });
-          }
-          this.showSidePanel = true;
-          void Storage.init().set("doma_agent_side_pannel_status", true);
-        }
+        handleBrowserActionClicked(tab, {
+          showSidePanel: this.showSidePanel,
+          setShowSidePanel: (open) => {
+            this.showSidePanel = open;
+          },
+        });
       });
 
-      getContext().browser.sidePanel.onClosed.addListener(()=>{
-        this.showSidePanel = false;
-        void Storage.init().set("doma_agent_side_pannel_status", false);
-      })
-      getContext().browser.sidePanel.onOpened.addListener(()=>{
-        this.showSidePanel = true;
-        void Storage.init().set("doma_agent_side_pannel_status", true);
-      })
+      registerNativeSidePanelListeners({
+        onClosed: () => {
+          this.showSidePanel = false;
+          void Storage.init().set("doma_agent_side_pannel_status", false);
+        },
+        onOpened: () => {
+          this.showSidePanel = true;
+          void Storage.init().set("doma_agent_side_pannel_status", true);
+        },
+      });
 
       getContext().browser.webNavigation.onBeforeNavigate.addListener((detail: any)=>{
         if(detail){

@@ -106,12 +106,11 @@ export const reloadCurrentPage = () => {
 
 
 export const getCurrentTab = (callback:Function, currentWindow: boolean = true) => {
-  const query = {active: true};
-  if(currentWindow){
-    (query as any).currentWindow = currentWindow;
-  }
-  getContext().browser.tabs.query(query, function(tabs:any){
-    callback(tabs.length ? tabs[0].url: null, tabs.length ? tabs[0].id: null);
+  // Safari 页内壳走 edition/pro（hostTab）；Open 仍为 tabs.query
+  void import("@/edition/activeBrowserTab").then(({ getCurrentTab: getTab }) => {
+    getTab(callback, currentWindow);
+  }).catch(() => {
+    callback(null, null);
   });
 }
 

@@ -1197,26 +1197,8 @@ export function useChatComposer(options: UseChatComposerOptions) {
 
   async function loadTabMentionItems() {
     try {
-      const tabs = await getContext().browser.tabs.query({ currentWindow: true }) as Array<{
-        id?: number;
-        title?: string;
-        url?: string;
-        favIconUrl?: string;
-        active?: boolean;
-        windowId?: number;
-        index?: number;
-      }>;
-      tabMentionItems.value = tabs
-        .filter((tab) => typeof tab.id === "number")
-        .sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
-        .map((tab) => ({
-          tabId: tab.id as number,
-          title: typeof tab.title === "string" ? tab.title : "",
-          url: typeof tab.url === "string" ? tab.url : "",
-          favIconUrl: typeof tab.favIconUrl === "string" ? tab.favIconUrl : undefined,
-          active: tab.active === true,
-          windowId: typeof tab.windowId === "number" ? tab.windowId : undefined,
-        }));
+      const { listMentionTabs } = await import("@/edition/activeBrowserTab");
+      tabMentionItems.value = await listMentionTabs();
     } catch {
       tabMentionItems.value = [];
     }

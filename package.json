@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "type": "module",
   "license": "PolyForm-Shield-1.0.0",
-  "description": "Conversation is action. The open-source version of DomA \u2014 an AI automation agent for the browser.",
+  "description": "Conversation is action. The open-source version of DomA — an AI automation agent for the browser.",
   "scripts": {
     "clean": "rm -rf dist/",
     "sync:edition-ts": "node scripts/sync-edition-tsconfig.mjs",
@@ -24,20 +24,7 @@
     "build:firefox": "npm-run-all --sequential firefox-build build:firefox-worker",
     "preview": "vite preview",
     "postinstall": "npm run sync:edition-ts",
-    "apply:pro": "node scripts/apply-pro-overlay.mjs",
-    "dev:desktop": "VITE_BUILD_EDITION=pro npm run sync:edition-ts && BUILD_TYPE=dev VITE_BUILD_EDITION=pro vite build --mode desktop --watch",
-    "build:desktop": "VITE_BUILD_EDITION=pro npm run sync:edition-ts && BUILD_TYPE=pro VITE_BUILD_EDITION=pro vite build --mode desktop",
-    "build:worker:pro": "VITE_BUILD_EDITION=pro npm run sync:edition-ts && BUILD_TYPE=pro VITE_BUILD_EDITION=pro vite build -c inline-builder.ts --mode desktop",
-    "dev:worker:pro": "VITE_BUILD_EDITION=pro npm run sync:edition-ts && BUILD_TYPE=dev VITE_BUILD_EDITION=pro vite build -c inline-builder.ts --mode desktop --watch",
-    "build:pro": "node scripts/apply-pro-overlay.mjs && npm run build:desktop && npm run build:worker:pro",
-    "dev:pro": "node scripts/apply-pro-overlay.mjs && npm-run-all --parallel clean \"dev:desktop\" \"dev:worker:pro\"",
-    "channel-key:info": "node scripts/channel-key-utils.mjs info",
-    "pack:store": "node scripts/pack-store-zip.mjs",
-    "pack:store:new": "node scripts/pack-store-zip.mjs --claim-id",
-    "build:store": "npm-run-all --sequential build:desktop pack:store",
-    "build:store:new": "npm-run-all --sequential build:desktop pack:store:new",
-    "pack:channel": "node scripts/pack-channel-crx.mjs",
-    "build:channel": "npm-run-all --sequential build:desktop pack:channel"
+    "apply:pro": "node scripts/apply-pro-overlay.mjs"
   },
   "dependencies": {
     "@codemirror/commands": "^6.8.1",

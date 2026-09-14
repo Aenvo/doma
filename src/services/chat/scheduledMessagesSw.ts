@@ -19,6 +19,7 @@ import {
   clearScheduledAlarm,
   listScheduledAlarmsDebug,
 } from "./scheduledMessagesAlarms";
+import { tryEnsureEditionSidePanel } from "@/edition/editionSwHooks";
 
 export type { ScheduledFirePayload };
 export { armScheduledAlarm, clearScheduledAlarm };
@@ -92,6 +93,9 @@ export async function ensureSidePanelReady(opts?: {
   intervalMs?: number;
 }): Promise<boolean> {
   if (await pingSidePanel()) return true;
+
+  // Pro Safari：页内 iframe（edition overlay）；Open / Chrome 返回 false 后走下方原生 sidePanel
+  if (await tryEnsureEditionSidePanel(opts)) return true;
 
   await openSidePanel();
 

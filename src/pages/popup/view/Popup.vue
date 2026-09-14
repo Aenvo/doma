@@ -25,7 +25,7 @@ import TabMenu from '@/components/popup/TabMenu.vue'
 import { type PopupMenu } from '@/types/MenuTypes';
 import Header from '../header/Header.vue';
 import Nav from '../header/Nav.vue';
-import { reloadCurrentPage, getContext, openOptionsPage, getCurrentTab, isBrowserProtected } from '@/services/Context';
+import { reloadCurrentPage, getContext, openOptionsPage } from '@/services/Context';
 import DaisyLoading from '@/components/layout/box/DaisyLoading.vue';
 import { useI18n } from 'vue-i18n';
 import { isMobile } from '@/utils/device';
