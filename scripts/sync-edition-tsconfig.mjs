@@ -1,5 +1,6 @@
 /**
- * Open 仓：写出极简 tsconfig.edition.json。
+ * 按 VITE_BUILD_EDITION 写出 tsconfig.edition.json，让 IDE「转到定义」跟版别走。
+ * 用法：VITE_BUILD_EDITION=open|pro node scripts/sync-edition-tsconfig.mjs
  */
 import { writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';

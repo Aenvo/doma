@@ -529,6 +529,17 @@ defineExpose({
   --composer-chip-height: 22px;
 }
 
+/* iOS：输入 <16px 会自动放大页面，放大后可拖动画布；触控设备抬到 16px 阻止该行为 */
+@media (hover: none) and (pointer: coarse) {
+  .composer-input-mix {
+    --composer-input-font-size: 16px;
+  }
+}
+
+html.doma-safari .composer-input-mix {
+  --composer-input-font-size: 16px;
+}
+
 .composer-input-mix .chat-input {
   display: block;
   width: 100%;

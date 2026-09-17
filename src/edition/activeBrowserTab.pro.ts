@@ -4,6 +4,7 @@
  */
 export {
   isSafariSidePanelShell,
+  requestCloseSidePanelShell,
   initActiveBrowserTabTracking,
   getActiveBrowserTabSync,
   resolveActiveBrowserTab,

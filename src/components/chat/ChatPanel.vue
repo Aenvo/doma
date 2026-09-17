@@ -1,5 +1,25 @@
 <template>
-  <div class="chat-panel">
+  <div class="chat-panel" :class="{ 'chat-panel--safari-shell': IS_SAFARI_EXT }">
+    <div v-if="IS_SAFARI_EXT" class="safari-shell-header">
+      <div class="safari-shell-brand">
+        <span class="safari-shell-icon doma-icon" aria-hidden="true" :style="domaIconMaskStyle" />
+        <span class="safari-shell-title">{{ safariShellTitle }}</span>
+      </div>
+      <button
+        type="button"
+        class="safari-panel-close-btn"
+        title="Close"
+        aria-label="Close"
+        @click="closeSafariSidePanel"
+      >
+        <svg class="safari-panel-close-icon" viewBox="0 0 12 12" width="18" height="18" aria-hidden="true">
+          <path
+            fill="currentColor"
+            d="M2.1 2.1a.75.75 0 0 1 1.06 0L6 4.94l2.84-2.84a.75.75 0 1 1 1.06 1.06L7.06 6l2.84 2.84a.75.75 0 1 1-1.06 1.06L6 7.06 3.16 9.9a.75.75 0 1 1-1.06-1.06L4.94 6 2.1 3.16a.75.75 0 0 1 0-1.06z"
+          />
+        </svg>
+      </button>
+    </div>
     <header class="chat-header">
       <div class="chat-title-row">
         <div class="chat-header-lead">
@@ -984,6 +1004,7 @@ import domaIconMaskUrl from "@/assets/images/doma-icon.svg?url";
 import DbPlusSvg from "@/assets/images/db-plus.svg";
 import McpLinkSvg from "@/assets/images/mcp-link.svg";
 import ConnectorPanel from "@/components/chat/ConnectorPanel.vue";
+import { getLocalizedString } from "@/services/extensionService";
 import { isHttpError } from "@/services/chat/sseFetcher";
 const domaIconMaskStyle = {
   maskImage: `url("${domaIconMaskUrl}")`,
@@ -1041,8 +1062,15 @@ import {
 import {
   initActiveBrowserTabTracking,
   isSafariSidePanelShell,
+  requestCloseSidePanelShell,
   resolveActiveBrowserTab,
 } from "@/edition/activeBrowserTab";
+import {
+  safariShellOnAssistantUpsert,
+  safariShellOnStop,
+  safariShellOnTurnDone,
+  safariShellOnUserSend,
+} from "@/edition/safariShellChat";
 
 /** Safari 页内壳：禁 tabs/windows；宿主 tab 由 edition(pro) + panelShell 注入 */
 const IS_SAFARI_EXT = isSafariSidePanelShell();
@@ -1052,6 +1080,14 @@ if (IS_SAFARI_EXT) {
     console.log("[ChatPanel] safari host tab", tab);
   });
 }
+
+function closeSafariSidePanel() {
+  void requestCloseSidePanelShell();
+}
+
+const safariShellTitle =
+  getLocalizedString("extension_name") || "DomA - Conversation is action, Your browser agent";
+
 
 const { t, locale } = useI18n();
 
@@ -4288,6 +4324,9 @@ async function stopTask(
   if (cid && !options?.skipAssistantMessage) {
     await addMessage(cid, "assistant", msg || t("chat.taskStopped"));
   }
+  if (cid) {
+    safariShellOnStop(cid, msg || t("chat.taskStopped"));
+  }
 }
 
 async function abortTask() {
@@ -5561,6 +5600,19 @@ function upsertAssistantMessage(
       });
     }
     queueOffPanelAssistantUpsert(convId, msgId, content, toolCall, customUi);
+    // Safari 页内把手镜像（Open / 非 Safari 为 noop）
+    if (content || toolCall) {
+      safariShellOnAssistantUpsert(
+        convId,
+        msgId,
+        content || "",
+        toolCall
+          ? toolCall.state === "doing"
+            ? toolCall.name
+            : ""
+          : undefined,
+      );
+    }
     return;
   }
 
@@ -5598,6 +5650,20 @@ function upsertAssistantMessage(
       toolState: toolCall.state,
       panelBound: true,
     });
+  }
+
+  const mirrored = messages.value.find((m) => m.id === msgId);
+  if (mirrored && (content || toolCall)) {
+    safariShellOnAssistantUpsert(
+      convId,
+      msgId,
+      String(mirrored.content ?? ""),
+      toolCall
+        ? toolCall.state === "doing"
+          ? toolCall.name
+          : ""
+        : undefined,
+    );
   }
 
   queueMessagePersist(msgId, convId);
@@ -6435,6 +6501,11 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
     const abortController = new AbortController();
     const site = await resolveSiteHost(opts);
     abortControllersByConversation.set(persistConvId, abortController);
+    // Pro+Safari：发送后收起页内壳、把手播报；Open / Chrome 侧栏 noop
+    safariShellOnUserSend(
+      persistConvId,
+      stripInteractionBlocksForHistoryUi(rawText).trim() || rawText.trim(),
+    );
     llmManager.sendMessage(
       persistConvId,
       llmSendText, {
@@ -6598,6 +6669,13 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
         setConversationLoading(convId, false);
         setConversationThinking(convId, false);
         abortControllersByConversation.delete(convId);
+
+        const chunks: string[] = [];
+        for (const id of msgIds) {
+          const c = getMessageById(id)?.content;
+          if (typeof c === "string" && c.trim()) chunks.push(c.trim());
+        }
+        safariShellOnTurnDone(convId, chunks.join("\n\n"), lastMsgId);
 
         const onPanel = convId === conversationId.value;
         const wasHandoff = takeHandoffPending(convId);
@@ -6944,6 +7022,91 @@ defineExpose({
   border-radius: 10px;
   overflow: hidden;
   isolation: isolate;
+}
+
+/* Safari 页内壳：圆角由 host 负责，内层再圆会露出白边，且挤裁 header 右上角 */
+.chat-panel.chat-panel--safari-shell {
+  border-radius: 0;
+}
+
+.safari-shell-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px 12px 10px 14px;
+  background: var(--stay-background, #fff);
+  border-bottom: 1px solid var(--stay-border, #e0e0e0);
+}
+
+.safari-shell-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.safari-shell-icon.doma-icon {
+  display: block;
+  width: 18px;
+  height: 18px;
+  margin-right: 0;
+  flex: 0 0 auto;
+  background-color: var(--stay-logo, var(--stay-black));
+  mask-size: contain;
+  mask-repeat: no-repeat;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+}
+
+.safari-shell-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--stay-black, #222);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.safari-panel-close-btn {
+  flex: 0 0 auto;
+  align-self: center;
+  background: none;
+  border: none;
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  min-height: 36px;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  color: var(--stay-black);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  line-height: 0;
+  transition:
+    color 0.16s ease,
+    background 0.16s ease;
+
+  &:hover {
+    background: var(--stay-border, #eee);
+  }
+
+  .safari-panel-close-icon {
+    display: block;
+    width: 18px;
+    height: 18px;
+    flex: 0 0 auto;
+  }
 }
 
 .chat-header {

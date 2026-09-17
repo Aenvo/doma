@@ -89,6 +89,13 @@ export function getActiveBrowserTabPath(rootDir, env = process.env) {
     : resolve(rootDir, 'src/edition/activeBrowserTab.pro.ts');
 }
 
+export function getSafariShellChatPath(rootDir, env = process.env) {
+  const edition = getBuildEdition(env);
+  return edition === 'open'
+    ? resolve(rootDir, 'src/edition/safariShellChat.open.ts')
+    : resolve(rootDir, 'src/edition/safariShellChat.pro.ts');
+}
+
 /**
  * IDE / tsc paths：与 getViteAliases 同一套 edition 模块，随 VITE_BUILD_EDITION 切换。
  * 由 scripts/sync-edition-tsconfig.mjs 写入 tsconfig.edition.json。
@@ -121,6 +128,9 @@ export function getEditionTsconfigPaths(env = process.env) {
     '@/edition/popupVideoDemo': [`src/edition/popupVideoDemo.${edition}.ts`],
     '@/edition/activeBrowserTab': [
       `src/edition/activeBrowserTab.${edition}.ts`,
+    ],
+    '@/edition/safariShellChat': [
+      `src/edition/safariShellChat.${edition}.ts`,
     ],
     '@doma/pro/*': ['packages/pro/src/*'],
     '@/*': ['src/*'],
@@ -177,6 +187,10 @@ export function getViteAliases(rootDir, env = process.env) {
     {
       find: '@/edition/activeBrowserTab',
       replacement: getActiveBrowserTabPath(rootDir, env),
+    },
+    {
+      find: '@/edition/safariShellChat',
+      replacement: getSafariShellChatPath(rootDir, env),
     },
     // Pro-only implementation tree (Open must not import via shared UI without edition bridge)
     { find: '@doma/pro', replacement: resolve(rootDir, 'packages/pro/src') },

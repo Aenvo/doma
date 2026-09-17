@@ -23,3 +23,85 @@ releases/
 /undefined/
 # Local apply:pro artifacts (do not commit)
 /packages/pro/
+
+# ---------------------------------------------------------------------------
+# apply-pro / build:pro-safari 摊开到 open 工作区的 Pro 渗入（勿 commit 进 Open）
+# 源真相在 ./pro；提交请到 pro 仓库。Open 仅保留下方 ! 排除的薄桩。
+# ---------------------------------------------------------------------------
+/safari/
+
+scripts/build-pro.mjs
+scripts/build-pro-safari.mjs
+scripts/build-safari.mjs
+scripts/dev-pro.mjs
+scripts/dev-pro-safari.mjs
+scripts/run-in-open-root.mjs
+
+src/components/account/
+src/components/chat/ChatPanelSlots.pro.vue
+src/components/chat/UserScriptSelector.vue
+src/components/chat/UserscriptCardRow.vue
+src/components/chat/UserscriptsPanel.vue
+src/components/chat/downloader/
+src/components/layout/header/LoginState.vue
+src/components/popup/RegisterMenuItem.vue
+src/components/popup/ScriptItem.vue
+src/components/popup/UpgradePro.vue
+
+src/config/locale/local.account.ts
+
+src/edition/chatPanelProBridge.pro.ts
+src/edition/editionBootstrap.pro.ts
+src/edition/popupVideoDemo.pro.ts
+src/edition/safariShellChat.pro.ts
+
+src/pages/sidepanel/
+src/pro/
+
+src/resources/platform/desktop/safari/
+src/resources/source/content.ts
+src/resources/source/downloader/
+src/resources/source/inject/heartbeat.js
+src/resources/source/inject/official.bridge.js
+src/resources/source/inject/parse.vide.mask.js
+src/resources/source/inject/sniffer.app.v3.js
+src/resources/source/inject/tag.js
+src/resources/source/inject/yt.hook.js
+
+src/services/STDevice.ts
+src/services/STFileManager.ts
+src/services/STNetwork.ts
+src/services/STPlan.ts
+src/services/STUserManager.ts
+src/services/currentUserId.ts
+src/services/manager/STFilterManager.ts
+
+src/services/chat/editionToolHandlers.pro.ts
+src/services/chat/proUpgradeModal.pro.ts
+src/services/chat/sendEdition.pro.ts
+src/services/chat/safariHostTab.ts
+src/services/chat/safariIframeApis.record.md
+src/services/chat/safariPanelHost.ts
+src/services/chat/safariStubs/
+src/services/chat/llm/domaService.ts
+src/services/chat/llm/editionSystemPrompt.pro.ts
+src/services/chat/llm/editionToolDefs.pro.ts
+src/services/chat/llm/entry.pro.ts
+
+src/services/database/code/
+src/services/database/user/
+src/services/database/userscript/
+
+src/services/extension/GMAPIHandler.ts
+src/services/extension/MatchPattern.ts
+src/services/extension/XhrLike.ts
+src/services/extension/gm/
+
+src/types/UserInfoEntity.ts
+src/utils/openStayAuthorizeLogin.ts
+src/utils/safariBuild.ts
+
+# Open 侧 Safari 薄桩：应提交到 open（apply-pro 不会提供 .open 桩）
+# （未列入上方 ignore，保持 git status 可见）
+#   src/edition/safariShellChat.open.ts
+#   src/edition/safariShellChat.ts

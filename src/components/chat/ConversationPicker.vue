@@ -608,14 +608,14 @@ onUnmounted(() => {
 
 .summary-count {
   font-size: 12px;
-  color: rgba(0, 0, 0, 0.55);
+  color: color-mix(in srgb, var(--stay-black, #2f3134) 55%, transparent);
 }
 
 .summary-host {
   flex: 1 1 auto;
   min-width: 0;
   font-size: 12px;
-  color: #8a8a8a;
+  color: var(--stay-gray, #909090);
   font-weight: 400;
   white-space: nowrap;
   overflow: hidden;
@@ -649,7 +649,7 @@ onUnmounted(() => {
   overflow-x: hidden;
   overflow-y: auto;
   scrollbar-width: thin;
-  scrollbar-color: rgba(0, 0, 0, 0.28) transparent;
+  scrollbar-color: color-mix(in srgb, var(--stay-black, #2f3134) 28%, transparent) transparent;
 }
 
 .conversation-list.is-overflowing {

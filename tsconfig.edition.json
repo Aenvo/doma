@@ -2,6 +2,48 @@
   "compilerOptions": {
     "baseUrl": ".",
     "paths": {
+      "@/edition/editionBootstrap": [
+        "src/edition/editionBootstrap.open.ts"
+      ],
+      "@/edition/editionSwHooks": [
+        "src/edition/editionSwHooks.open.ts"
+      ],
+      "@/services/chat/llm/entry": [
+        "src/services/chat/llm/entry.open.ts"
+      ],
+      "@/services/chat/llm/editionToolDefs": [
+        "src/services/chat/llm/editionToolDefs.open.ts"
+      ],
+      "@/services/chat/llm/editionSystemPrompt": [
+        "src/services/chat/llm/editionSystemPrompt.open.ts"
+      ],
+      "@/services/chat/sendEdition": [
+        "src/services/chat/sendEdition.open.ts"
+      ],
+      "@/services/chat/proUpgradeModal": [
+        "src/services/chat/proUpgradeModal.open.ts"
+      ],
+      "@/services/chat/editionToolHandlers": [
+        "src/services/chat/editionToolHandlers.open.ts"
+      ],
+      "@/components/chat/ChatPanelSlots": [
+        "src/components/chat/ChatPanelSlots.open.vue"
+      ],
+      "@/edition/chatPanelProBridge": [
+        "src/edition/chatPanelProBridge.open.ts"
+      ],
+      "@/edition/popupVideoDemo": [
+        "src/edition/popupVideoDemo.open.ts"
+      ],
+      "@/edition/activeBrowserTab": [
+        "src/edition/activeBrowserTab.open.ts"
+      ],
+      "@/edition/safariShellChat": [
+        "src/edition/safariShellChat.open.ts"
+      ],
+      "@doma/pro/*": [
+        "packages/pro/src/*"
+      ],
       "@/*": [
         "src/*"
       ]

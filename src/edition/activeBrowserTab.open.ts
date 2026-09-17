@@ -25,6 +25,11 @@ export function isSafariSidePanelShell(): boolean {
   return false;
 }
 
+/** Safari 页内壳关闭侧栏；Open / Chrome sidePanel 无操作 */
+export async function requestCloseSidePanelShell(): Promise<boolean> {
+  return false;
+}
+
 /** ChatPanel 启动时建立宿主 tab 跟踪；Open 无额外逻辑 */
 export function initActiveBrowserTabTracking(
   _onUpdate?: (tab: BrowserTabLite) => void,
