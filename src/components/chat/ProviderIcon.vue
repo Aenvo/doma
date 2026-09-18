@@ -16,12 +16,16 @@ import qwenIcon from '@/assets/images/providers/qwen.svg?url';
 import deepseekIcon from '@/assets/images/providers/deepseek.svg?url';
 import siliconflowIcon from '@/assets/images/providers/siliconflow.svg?url';
 import openaiIcon from '@/assets/images/providers/openai.svg?url';
+import relayIcon from '@/assets/images/providers/relay.svg?url';
+import anthropicIcon from '@/assets/images/providers/anthropic.svg?url';
 
 const ICONS: Record<OpenProviderId, string> = {
   openai: openaiIcon,
   qwen: qwenIcon,
   deepseek: deepseekIcon,
   siliconflow: siliconflowIcon,
+  relay: relayIcon,
+  anthropic: anthropicIcon,
 };
 
 const props = withDefaults(

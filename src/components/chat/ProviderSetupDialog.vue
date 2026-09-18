@@ -4,7 +4,7 @@
     role="dialog"
     aria-modal="true"
     :aria-label="t('chat.providerSetup.title')"
-    @mousedown.self="emit('close')"
+    @mousedown.self="closeDialog"
   >
     <div class="provider-setup-dialog">
       <div class="provider-setup-header">
@@ -37,7 +37,7 @@
           type="button"
           class="provider-setup-close"
           :aria-label="t('chat.providerSetup.close')"
-          @click="emit('close')"
+          @click="closeDialog"
         >
           <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
             <path
@@ -158,7 +158,7 @@
         </div>
 
         <div class="provider-setup-actions provider-setup-actions--main">
-          <button type="button" class="provider-setup-btn" @click="emit('close')">
+          <button type="button" class="provider-setup-btn" @click="closeDialog">
             {{ t('chat.providerSetup.ok') }}
           </button>
         </div>
@@ -197,6 +197,22 @@
       <!-- ===== 配置提供商：Key + 模型 Switch 列表 ===== -->
       <template v-else>
         <p class="provider-setup-desc">{{ t('chat.providerSetup.desc') }}</p>
+
+        <template v-if="presets[editProviderId].showBaseUrl">
+          <label class="provider-setup-label">{{ t('chat.providerSetup.baseUrl') }}</label>
+          <input
+            v-model="draftBaseUrl"
+            type="text"
+            class="provider-setup-input"
+            :placeholder="
+              presets[editProviderId].defaultBaseUrl ||
+              t('chat.providerSetup.baseUrlPlaceholder')
+            "
+            autocomplete="off"
+            @input="onBaseUrlInput"
+            @blur="onApiKeyBlur"
+          />
+        </template>
 
         <label class="provider-setup-label">{{ t('chat.providerSetup.apiKey') }}</label>
         <div class="provider-setup-apikey-wrap">
@@ -247,14 +263,25 @@
         </div>
 
         <template v-if="presets[editProviderId].showBaseUrl">
-          <label class="provider-setup-label">{{ t('chat.providerSetup.baseUrl') }}</label>
-          <input
-            v-model="draftBaseUrl"
-            type="text"
-            class="provider-setup-input"
-            :placeholder="presets[editProviderId].defaultBaseUrl"
-            @blur="onApiKeyBlur"
-          />
+          <label class="provider-setup-label">{{ t('chat.providerSetup.manualModel') }}</label>
+          <div class="provider-setup-manual-row">
+            <input
+              v-model="draftManualModel"
+              type="text"
+              class="provider-setup-input provider-setup-manual-input"
+              :placeholder="t('chat.providerSetup.manualModelPlaceholder')"
+              autocomplete="off"
+              @keydown.enter.prevent="onAddManualModel"
+            />
+            <button
+              type="button"
+              class="provider-setup-fetch"
+              :disabled="!draftManualModel.trim()"
+              @click="onAddManualModel"
+            >
+              {{ t('chat.providerSetup.addManualModel') }}
+            </button>
+          </div>
         </template>
 
         <div class="provider-setup-model-row">
@@ -351,13 +378,17 @@ const view = ref<View>('main');
 const searchQuery = ref('');
 const editSearchQuery = ref('');
 const editProviderId = ref<OpenProviderId>('qwen');
+/** 本次从「添加提供商」进入；未真正配置前不进列表 */
+const editingIsNew = ref(false);
 const draftApiKey = ref('');
 const draftBaseUrl = ref('');
+const draftManualModel = ref('');
 const showApiKey = ref(false);
 const fetching = ref(false);
 const errorText = ref('');
 const fetchedModelList = ref<string[]>([]);
 const lastFetchedApiKey = ref('');
+const lastFetchedBaseUrl = ref('');
 const enabledTick = ref(0);
 let autoFetchTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -371,7 +402,7 @@ const headerTitle = computed(() => {
 
 function onHeaderBack() {
   if (view.value === 'editProvider') {
-    backFromEdit();
+    void backFromEdit();
     return;
   }
   view.value = 'main';
@@ -439,24 +470,60 @@ async function onSelectEnabled(provider: OpenProviderId, model: string) {
 
 function openEditProvider(pid: OpenProviderId, isNew = false) {
   editProviderId.value = pid;
+  editingIsNew.value = isNew;
   const cfg = llmManager.getConfig();
   draftApiKey.value = cfg.apiKeys[pid] || '';
   draftBaseUrl.value = cfg.baseUrls[pid] || presets[pid].defaultBaseUrl;
+  draftManualModel.value = '';
   fetchedModelList.value = [...(cfg.fetchedModels[pid] || [])];
   lastFetchedApiKey.value = draftApiKey.value.trim();
+  lastFetchedBaseUrl.value = draftBaseUrl.value.trim();
   editSearchQuery.value = '';
   showApiKey.value = false;
   errorText.value = '';
   view.value = 'editProvider';
-  if (isNew) {
-    void llmManager.addConfiguredProvider(pid).then(() => bump());
-  }
+  // 新添加：等真正填好 Key（及 Base URL）并保存/拉取后再进 Providers 列表
   if (canAutoFetch() && fetchedModelList.value.length === 0) {
     void onFetchModels({ silentEmpty: true });
   }
 }
 
-function backFromEdit() {
+function isDraftConfigured(pid: OpenProviderId = editProviderId.value): boolean {
+  const preset = presets[pid];
+  const key = draftApiKey.value.trim();
+  const base = (draftBaseUrl.value || preset.defaultBaseUrl).trim();
+  if (preset.requireApiKey && !key) return false;
+  if (preset.showBaseUrl && !base) return false;
+  return true;
+}
+
+async function commitProviderIfConfigured() {
+  const id = editProviderId.value;
+  if (!isDraftConfigured(id)) return false;
+  await llmManager.saveConfig({
+    apiKeys: { ...llmManager.getConfig().apiKeys, [id]: draftApiKey.value.trim() },
+    baseUrls: {
+      ...llmManager.getConfig().baseUrls,
+      [id]: (draftBaseUrl.value || presets[id].defaultBaseUrl).trim(),
+    },
+  });
+  await llmManager.addConfiguredProvider(id);
+  editingIsNew.value = false;
+  bump();
+  return true;
+}
+
+async function backFromEdit() {
+  if (autoFetchTimer) {
+    clearTimeout(autoFetchTimer);
+    autoFetchTimer = null;
+  }
+  const id = editProviderId.value;
+  // 点返回且尚未真正配置：不留在 Providers 列表
+  if (editingIsNew.value && !isDraftConfigured(id)) {
+    await llmManager.removeConfiguredProvider(id);
+  }
+  editingIsNew.value = false;
   view.value = 'main';
   bump();
 }
@@ -467,7 +534,26 @@ async function onRemoveProvider(pid: OpenProviderId) {
   emit('saved');
 }
 
-function finishEdit() {
+async function finishEdit() {
+  if (autoFetchTimer) {
+    clearTimeout(autoFetchTimer);
+    autoFetchTimer = null;
+  }
+  const id = editProviderId.value;
+  if (!isDraftConfigured(id)) {
+    if (editingIsNew.value) {
+      await llmManager.removeConfiguredProvider(id);
+      editingIsNew.value = false;
+      view.value = 'main';
+      bump();
+      return;
+    }
+    errorText.value = presets[id].showBaseUrl && !(draftBaseUrl.value || '').trim()
+      ? t('chat.providerSetup.errorNeedBaseUrl')
+      : t('chat.providerSetup.errorNeedApiKey');
+    return;
+  }
+  await commitProviderIfConfigured();
   view.value = 'main';
   bump();
   emit('saved');
@@ -476,11 +562,18 @@ function finishEdit() {
 function canAutoFetch(): boolean {
   const preset = presets[editProviderId.value];
   const key = draftApiKey.value.trim();
+  const base = (draftBaseUrl.value || preset.defaultBaseUrl).trim();
+  if (preset.showBaseUrl && !base) return false;
   if (preset.requireApiKey) return !!key;
-  return !!(key || (draftBaseUrl.value || preset.defaultBaseUrl).trim());
+  return !!(key || base);
 }
 
 function onApiKeyInput() {
+  if (autoFetchTimer) clearTimeout(autoFetchTimer);
+  autoFetchTimer = setTimeout(() => maybeAutoFetchModels(), 450);
+}
+
+function onBaseUrlInput() {
   if (autoFetchTimer) clearTimeout(autoFetchTimer);
   autoFetchTimer = setTimeout(() => maybeAutoFetchModels(), 450);
 }
@@ -499,8 +592,17 @@ function onApiKeyChange() {
 
 function maybeAutoFetchModels() {
   const key = draftApiKey.value.trim();
+  const base = (
+    draftBaseUrl.value || presets[editProviderId.value].defaultBaseUrl
+  ).trim();
   if (!canAutoFetch()) return;
-  if (key === lastFetchedApiKey.value && fetchedModelList.value.length > 0) return;
+  if (
+    key === lastFetchedApiKey.value &&
+    base === lastFetchedBaseUrl.value &&
+    fetchedModelList.value.length > 0
+  ) {
+    return;
+  }
   void onFetchModels();
 }
 
@@ -508,24 +610,32 @@ async function onFetchModels(opts?: { silentEmpty?: boolean }) {
   if (fetching.value) return;
   errorText.value = '';
   const id = editProviderId.value;
-  if (presets[id].requireApiKey && !draftApiKey.value.trim()) {
+  const preset = presets[id];
+  if (preset.showBaseUrl && !(draftBaseUrl.value || preset.defaultBaseUrl).trim()) {
+    errorText.value = t('chat.providerSetup.errorNeedBaseUrl');
+    return;
+  }
+  if (preset.requireApiKey && !draftApiKey.value.trim()) {
     errorText.value = t('chat.providerSetup.errorNeedApiKey');
     return;
   }
   fetching.value = true;
   try {
     const key = draftApiKey.value.trim();
+    const base = (draftBaseUrl.value || preset.defaultBaseUrl).trim();
     await llmManager.saveConfig({
       apiKeys: { ...llmManager.getConfig().apiKeys, [id]: key },
       baseUrls: {
         ...llmManager.getConfig().baseUrls,
-        [id]: (draftBaseUrl.value || presets[id].defaultBaseUrl).trim(),
+        [id]: base,
       },
     });
     await llmManager.addConfiguredProvider(id);
+    editingIsNew.value = false;
     const list = await llmManager.fetchModelsForProvider(id);
     fetchedModelList.value = list;
     lastFetchedApiKey.value = key;
+    lastFetchedBaseUrl.value = base;
     bump();
     if (!list.length && !opts?.silentEmpty) {
       errorText.value = t('chat.providerSetup.errorEmptyFetch');
@@ -537,11 +647,56 @@ async function onFetchModels(opts?: { silentEmpty?: boolean }) {
   }
 }
 
+async function onAddManualModel() {
+  const id = editProviderId.value;
+  const name = draftManualModel.value.trim();
+  if (!name) return;
+  errorText.value = '';
+  if (!isDraftConfigured(id)) {
+    errorText.value = presets[id].showBaseUrl && !(draftBaseUrl.value || '').trim()
+      ? t('chat.providerSetup.errorNeedBaseUrl')
+      : t('chat.providerSetup.errorNeedApiKey');
+    return;
+  }
+  try {
+    await commitProviderIfConfigured();
+    const added = await llmManager.addCustomModel(id, name);
+    if (!added) return;
+    if (!fetchedModelList.value.includes(added)) {
+      fetchedModelList.value = [...fetchedModelList.value, added];
+    }
+    draftManualModel.value = '';
+    bump();
+    emit('saved');
+  } catch (e) {
+    errorText.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
 async function toggleModel(provider: OpenProviderId, model: string) {
+  if (!isDraftConfigured(provider)) {
+    errorText.value = presets[provider].showBaseUrl && !(draftBaseUrl.value || '').trim()
+      ? t('chat.providerSetup.errorNeedBaseUrl')
+      : t('chat.providerSetup.errorNeedApiKey');
+    return;
+  }
+  await commitProviderIfConfigured();
   const next = !llmManager.isModelEnabled(provider, model);
   await llmManager.setModelEnabled(provider, model, next);
   bump();
   emit('saved');
+}
+
+/** 关闭弹窗时：未配置完的新建提供商不留在列表 */
+async function closeDialog() {
+  if (view.value === 'editProvider' && editingIsNew.value) {
+    const id = editProviderId.value;
+    if (!isDraftConfigured(id)) {
+      await llmManager.removeConfiguredProvider(id);
+    }
+    editingIsNew.value = false;
+  }
+  emit('close');
 }
 </script>
 
@@ -929,6 +1084,15 @@ async function toggleModel(provider: OpenProviderId, model: string) {
 }
 .provider-setup-apikey-input {
   padding-right: 36px;
+}
+.provider-setup-manual-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.provider-setup-manual-input {
+  flex: 1;
+  min-width: 0;
 }
 .provider-setup-apikey-toggle {
   position: absolute;

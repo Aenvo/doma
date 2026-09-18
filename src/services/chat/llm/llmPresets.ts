@@ -1,8 +1,14 @@
 /** Open 版 BYOK 预设；Pro 不依赖本表做默认路径 */
 
-export type OpenProviderId = 'openai' | 'qwen' | 'deepseek' | 'siliconflow';
+export type OpenProviderId =
+  | 'openai'
+  | 'qwen'
+  | 'deepseek'
+  | 'siliconflow'
+  | 'relay'
+  | 'anthropic';
 
-export type LlmTransport = 'openai_compatible';
+export type LlmTransport = 'openai_compatible' | 'anthropic_messages';
 
 export interface OpenProviderPreset {
   id: OpenProviderId;
@@ -67,6 +73,34 @@ export const OPEN_PROVIDER_PRESETS: Record<OpenProviderId, OpenProviderPreset> =
     defaultModel: 'deepseek-ai/DeepSeek-V3',
     hintModels: ['deepseek-ai/DeepSeek-V3', 'Qwen/Qwen2.5-7B-Instruct'],
     docsUrl: 'https://cloud.siliconflow.cn/',
+  },
+  relay: {
+    id: 'relay',
+    label: 'Relay',
+    labelZh: '中转站',
+    transport: 'openai_compatible',
+    /** 用户自填；须含 /v1 或可被 resolve*Url 规范化 */
+    defaultBaseUrl: '',
+    requireApiKey: true,
+    showBaseUrl: true,
+    defaultModel: 'gpt-4o',
+    hintModels: [],
+  },
+  anthropic: {
+    id: 'anthropic',
+    label: 'Anthropic',
+    labelZh: 'Anthropic',
+    transport: 'anthropic_messages',
+    defaultBaseUrl: 'https://api.anthropic.com',
+    requireApiKey: true,
+    showBaseUrl: false,
+    defaultModel: 'claude-sonnet-4-20250514',
+    hintModels: [
+      'claude-sonnet-4-20250514',
+      'claude-opus-4-20250514',
+      'claude-3-5-haiku-20241022',
+    ],
+    docsUrl: 'https://console.anthropic.com/settings/keys',
   },
 };
 

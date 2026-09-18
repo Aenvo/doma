@@ -7,11 +7,12 @@
 import type { LlmSendMessageOptions, LlmSendMeta } from './llmTypes';
 import { LlmService } from './llmService';
 import type { McpClient } from '@/services/mcp/mcpClient';
-import { DEFAULT_MODELS } from './llmTypes';
 import {
   OpenAICompatibleService,
   fetchOpenAiCompatibleModels,
 } from './openaiCompatibleService';
+import { AnthropicClaudeService } from './anthropicClaudeService';
+import { fetchAnthropicModels } from '../anthropicSseFetcher';
 import { createMCPClient } from '@/services/mcp/mcpClient';
 import { ExtensionClientTransport } from '@/services/mcp/extensionTransport';
 import { getContext } from '@/services/Context';
@@ -72,13 +73,25 @@ class OpenLlmManager {
   constructor(mcpClient: McpClient) {
     for (const id of OPEN_PROVIDER_IDS) {
       const preset = OPEN_PROVIDER_PRESETS[id];
-      this.services.set(
-        id,
-        new OpenAICompatibleService('', preset.defaultModel, mcpClient, preset.defaultBaseUrl, {
-          name: preset.label,
-          extraBody: id === 'qwen' ? { enable_thinking: false } : undefined,
-        }),
-      );
+      if (preset.transport === 'anthropic_messages') {
+        this.services.set(
+          id,
+          new AnthropicClaudeService(
+            '',
+            preset.defaultModel,
+            mcpClient,
+            preset.defaultBaseUrl,
+          ),
+        );
+      } else {
+        this.services.set(
+          id,
+          new OpenAICompatibleService('', preset.defaultModel, mcpClient, preset.defaultBaseUrl, {
+            name: preset.label,
+            extraBody: id === 'qwen' ? { enable_thinking: false } : undefined,
+          }),
+        );
+      }
     }
 
     getContext().browser.runtime.onMessage.addListener((message: any) => {
@@ -172,12 +185,14 @@ class OpenLlmManager {
       const model =
         (this.config.provider === id ? this.config.activeModel : null) ||
         OPEN_PROVIDER_PRESETS[id].defaultModel ||
-        DEFAULT_MODELS[id];
+        '';
       const baseUrl = this.effectiveBaseUrl(id);
       if (service instanceof OpenAICompatibleService) {
-        service.setConfig(apiKey, model || DEFAULT_MODELS[id], baseUrl);
+        service.setConfig(apiKey, model || OPEN_PROVIDER_PRESETS[id].defaultModel, baseUrl);
+      } else if (service instanceof AnthropicClaudeService) {
+        service.setConfig(apiKey, model || OPEN_PROVIDER_PRESETS[id].defaultModel, baseUrl);
       } else {
-        service.setConfig(apiKey, model || DEFAULT_MODELS[id]);
+        service.setConfig(apiKey, model || OPEN_PROVIDER_PRESETS[id].defaultModel);
       }
     }
   }
@@ -339,11 +354,49 @@ class OpenLlmManager {
     if (preset.requireApiKey && !apiKey.trim()) {
       throw new Error('请先填写 API Key');
     }
-    const list = await fetchOpenAiCompatibleModels(baseUrl, apiKey);
+    if (preset.showBaseUrl && !baseUrl.trim()) {
+      throw new Error('请先填写 Base URL');
+    }
+    let list: string[] = [];
+    try {
+      if (preset.transport === 'anthropic_messages') {
+        list = await fetchAnthropicModels(baseUrl, apiKey);
+      } else {
+        list = await fetchOpenAiCompatibleModels(baseUrl, apiKey);
+      }
+    } catch (e) {
+      // Anthropic / 部分网关拉列表失败时回落到 hint，仍可手填
+      if (preset.hintModels.length) {
+        console.warn('[OpenLlmManager] fetch models failed, using hints', e);
+        list = [...preset.hintModels];
+      } else {
+        throw e;
+      }
+    }
+    // 刷新时保留已启用但不在远端列表中的手填模型；Anthropic 额外保留 hint
+    const keep = this.config.enabledModels
+      .filter((e) => e.provider === provider)
+      .map((e) => e.model);
+    const hints =
+      preset.transport === 'anthropic_messages' ? preset.hintModels : [];
+    const merged = Array.from(new Set([...list, ...keep, ...hints]));
     await this.saveConfig({
-      fetchedModels: { ...this.config.fetchedModels, [provider]: list },
+      fetchedModels: { ...this.config.fetchedModels, [provider]: merged },
     });
-    return list;
+    return merged;
+  }
+
+  /** 手填模型名：并入 fetchedModels 并启用 */
+  async addCustomModel(provider: OpenProviderId, model: string): Promise<string> {
+    const name = model.trim();
+    if (!name) return '';
+    const prev = this.config.fetchedModels[provider] || [];
+    const next = prev.includes(name) ? prev : [...prev, name];
+    await this.saveConfig({
+      fetchedModels: { ...this.config.fetchedModels, [provider]: next },
+    });
+    await this.setModelEnabled(provider, name, true);
+    return name;
   }
 
   getCurrentService(): LlmService | undefined {
