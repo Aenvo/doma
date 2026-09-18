@@ -3,8 +3,6 @@
     "version": "0.0.17",
     "description": "__MSG_extension_description__",
     "manifest_version": 3,
-    "build": "274",
-    "copyright": "DomA Agent",
     "default_locale": "en",
     "icons": {
         "48": "extension-img/icon-48.png",
@@ -80,7 +78,6 @@
         "sandbox": "sandbox allow-scripts allow-forms allow-popups allow-modals; script-src 'self' 'unsafe-inline' 'unsafe-eval'; child-src 'self';"
     },
     "permissions": [
-        "<all_urls>",
         "sidePanel",
         "activeTab",
         "storage",
