@@ -76,11 +76,16 @@ const hasFilesInDirectorySync = (dirPath: string): boolean => {
     }
 }
 
-/** Open 仓：固定使用单轨资源路径 */
-export const copyFilesConfig = (OUTPUT_DIR:string, platformName:string, browserName:string, _buildEdition = 'open') => {
+/** Open 仓：优先使用版别 manifest，不存在时回退到浏览器公共 manifest */
+export const copyFilesConfig = (OUTPUT_DIR:string, platformName:string, browserName:string, buildEdition = 'open') => {
+    const manifestDir = resolve(`src/resources/platform/${platformName}/${browserName}`);
+    const editionManifest = resolve(manifestDir, `manifest.${buildEdition}.json`);
+    const manifest = fs.existsSync(editionManifest)
+      ? editionManifest
+      : resolve(manifestDir, 'manifest.json');
     const targets = [
         {
-            src: resolve(`src/resources/platform/${platformName}/${browserName}/manifest.json`),
+            src: manifest,
             dest: resolve(`${OUTPUT_DIR}/`),
             rename: 'manifest.json',
         },
