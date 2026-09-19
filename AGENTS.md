@@ -45,6 +45,14 @@ Implement against the **current workspace sources**. Do not assume modules exist
 
 Often needed next: `llm/contextManager.ts`, `chatStorage.ts`, `skills/`, `slashCommands.ts`, MCP under `src/services/mcp*` and chat MCP helpers.
 
+### Pro / Safari overlay (critical)
+
+`npm run build:pro-safari --prefix pro` runs **apply-pro**, which copies `./pro` onto the Open root and **overwrites** same paths.
+
+- Safari 页内壳、账号栈、`*.pro.ts`、Pro ChatPanel slots 等 → **只改 `pro/src/...`**
+- 只改 Open 且 `pro/` 有同名文件 → 下次编 Safari 会被盖掉  
+- See [`.cursor/rules/pro-overlay-edit.mdc`](./.cursor/rules/pro-overlay-edit.mdc)
+
 Rough turn flow:
 
 1. UI / composer accepts the user message (`ChatPanel` and composer components)
@@ -143,6 +151,7 @@ If it can avoid `ChatPanel.vue`, avoid it.
 - Invent top-level frameworks or storage systems when neighbors already solve it  
 - Delete retained disabled-feature implementations marked for reconnect  
 - Mass-reformat or rewrite `ChatPanel` session binding  
+- Edit Safari / Pro-only sources only under Open when the same path exists in `pro/` (apply-pro will wipe it)  
 - Commit `dist/`, secrets, private keys, or local env files  
 - Help turn this codebase into a competing product or store listing (see PolyForm Shield in `LICENSE`)
 
