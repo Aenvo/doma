@@ -27,6 +27,9 @@
           <span>{{ t('chat.activity.waiting') }}</span>
         </div>
         <ol v-else class="activity-trace__list">
+          <li v-if="trace.omittedCount" class="activity-trace__omitted">
+            {{ t('chat.activity.earlierSteps', { count: trace.omittedCount }) }}
+          </li>
           <li
             v-for="item in trace.items"
             :key="item.id"
@@ -39,8 +42,8 @@
               aria-hidden="true"
             ></span>
             <div class="activity-trace__item-content">
-              <pre v-if="item.kind === 'reasoning'" class="activity-trace__reasoning">{{ item.text }}</pre>
-              <span v-else>{{ item.text }}</span>
+              <span>{{ item.kind === 'reasoning' ? t('chat.activity.reasoning') : item.text }}</span>
+              <span v-if="(item.count ?? 1) > 1" class="activity-trace__count"> × {{ item.count }}</span>
               <a
                 v-if="item.url"
                 class="activity-trace__link"
@@ -204,6 +207,12 @@ function displayUrl(value: string): string {
   line-height: 1.55;
 }
 
+.activity-trace__omitted {
+  color: var(--stay-secondaryFont, #8a8a8a);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .activity-trace__marker {
   position: absolute;
   top: 7px;
@@ -230,12 +239,8 @@ function displayUrl(value: string): string {
   word-break: break-word;
 }
 
-.activity-trace__reasoning {
-  margin: 0;
-  color: inherit;
-  font: inherit;
-  white-space: pre-wrap;
-  word-break: break-word;
+.activity-trace__count {
+  white-space: nowrap;
 }
 
 .activity-trace__link {

@@ -14,6 +14,8 @@ type ToolCallLike = {
   };
 };
 
+const MAX_ACTIVITY_TRACE_ITEMS = 8;
+
 export function cloneTurnActivityTrace(trace: TurnActivityTrace): TurnActivityTrace {
   return JSON.parse(JSON.stringify(trace)) as TurnActivityTrace;
 }
@@ -24,7 +26,7 @@ export function createTurnActivityTrace(msgId: string): TurnActivityTrace {
     status: "running",
     phase: "thinking",
     startedAt: Date.now(),
-    expanded: true,
+    expanded: false,
     items: [],
   };
 }
@@ -39,24 +41,6 @@ export function reopenTurnActivityTrace(
     trace.expanded = true;
   }
   trace.phase = phase;
-}
-
-export function appendReasoningToTrace(trace: TurnActivityTrace, content: string): boolean {
-  if (!content) return false;
-  reopenTurnActivityTrace(trace);
-  let item = trace.items.find((entry) => entry.kind === "reasoning");
-  if (!item) {
-    item = {
-      id: `${trace.id}-reasoning`,
-      kind: "reasoning",
-      text: "",
-      status: "running",
-    };
-    trace.items.push(item);
-  }
-  item.status = "running";
-  item.text += content;
-  return true;
 }
 
 function parseToolArgs(toolCall: ToolCallLike): Record<string, unknown> {
@@ -76,8 +60,10 @@ function toolKind(name: string): { kind: ActivityTraceItem["kind"]; phase: Activ
     return { kind: "search", phase: "searching" };
   }
   if (
-    normalized.startsWith("browser_") &&
+    normalized === "browser_execute_script" ||
+    (normalized.startsWith("browser_") &&
     /(navigate|page|element|tab|screenshot|capture|content|scroll|click)/.test(normalized)
+    )
   ) {
     return { kind: "browse", phase: "browsing" };
   }
@@ -117,6 +103,15 @@ function searchCount(result: unknown): number | undefined {
     if (Array.isArray(record[key])) return record[key].length;
   }
   return undefined;
+}
+
+function trimTraceItems(trace: TurnActivityTrace): void {
+  while (trace.items.length > MAX_ACTIVITY_TRACE_ITEMS) {
+    const removableIndex = trace.items.findIndex((entry) => entry.status !== "running");
+    if (removableIndex === -1) return;
+    const [removed] = trace.items.splice(removableIndex, 1);
+    trace.omittedCount = (trace.omittedCount ?? 0) + Math.max(1, removed?.count ?? 1);
+  }
 }
 
 function toolStartText(
@@ -170,12 +165,30 @@ export function startToolInTrace(
   const { kind, phase } = toolKind(name);
   trace.phase = phase;
   const url = activityUrl(args);
+  const lastItem = trace.items[trace.items.length - 1];
+  const canAggregate = !!lastItem
+    && lastItem.toolName === name
+    && lastItem.status !== "error"
+    && (
+      name === "browser_execute_script"
+      || (kind === "tool" && lastItem.kind === "tool")
+    );
+  if (canAggregate) {
+    lastItem.toolCallId = String(toolCall.id ?? "");
+    lastItem.count = Math.max(1, lastItem.count ?? 1) + 1;
+    lastItem.text = toolStartText(name, args, kind, t);
+    lastItem.status = "running";
+    lastItem.url = url ?? lastItem.url;
+    return;
+  }
   const item: ActivityTraceItem = {
     id: `${trace.id}-tool-${String(toolCall.id ?? trace.items.length)}`,
     toolCallId: String(toolCall.id ?? ""),
     kind,
     text: toolStartText(name, args, kind, t),
     status: "running",
+    toolName: name,
+    count: 1,
     ...(url ? { url } : {}),
   };
   const existingIndex = trace.items.findIndex(
@@ -183,6 +196,7 @@ export function startToolInTrace(
   );
   if (existingIndex === -1) trace.items.push(item);
   else trace.items[existingIndex] = item;
+  trimTraceItems(trace);
 }
 
 export function completeToolInTrace(

@@ -1375,12 +1375,14 @@ export interface ActivityTraceItem {
   text: string;
   status: 'running' | 'completed' | 'error';
   toolCallId?: string;
+  toolName?: string;
+  count?: number;
   url?: string;
 }
 
 /**
  * 一次用户请求的可见活动轨迹。
- * reasoning 只记录供应商实际返回的推理字段；其余条目来自真实工具执行事件。
+ * 新回合只持久化真实工具事件；reasoning kind 仅用于兼容已有历史数据，界面不展示原文。
  */
 export interface TurnActivityTrace {
   id: string;
@@ -1389,6 +1391,7 @@ export interface TurnActivityTrace {
   startedAt: number;
   finishedAt?: number;
   expanded: boolean;
+  omittedCount?: number;
   items: ActivityTraceItem[];
 }
 

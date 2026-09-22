@@ -261,7 +261,6 @@ export class LlmService {
               }
               if (sseEvent.type === 'text') {
                 assistantText += sseEvent.content;
-                options.onTextMessage(_conversationId, sseEvent.msgId!, sseEvent.content);
               }
               if (sseEvent.type === 'reasoning') {
                 assistantReasoning += sseEvent.content;
@@ -471,6 +470,11 @@ export class LlmService {
               throw new EmptyAssistantResponseError();
             }
 
+            // 一轮响应可能先输出进度文本，随后才发起 tool_call。只有整轮确认没有
+            // 工具调用时才发布为用户可见正文，避免把临时播报持久化成聊天消息。
+            if (assistantText) {
+              options.onTextMessage(_conversationId, msgId, assistantText);
+            }
             options.onMessageDone(_conversationId, msgId);
             return "done";
           }

@@ -116,6 +116,7 @@ export default {
         toolRunning: "Running {name}",
         toolCompleted: "Completed {name}",
         toolFailed: "Failed {name}",
+        earlierSteps: "{count} earlier steps collapsed",
       },
       plan: {
         title: "Plan",
@@ -588,6 +589,7 @@ export default {
         toolRunning: "正在执行 {name}",
         toolCompleted: "已完成 {name}",
         toolFailed: "执行失败 {name}",
+        earlierSteps: "已收起较早的 {count} 个步骤",
       },
       plan: {
         title: "计划",

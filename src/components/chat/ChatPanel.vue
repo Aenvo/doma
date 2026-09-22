@@ -903,7 +903,6 @@ import {
 import { isCliBridgeEnabled, isMcpBridgeEnabled } from "@/services/chat/mcpBridgePrefs";
 import { prepareUserSendText } from "@/services/chat/interactionBlockSendHints";
 import {
-  appendReasoningToTrace,
   cloneTurnActivityTrace,
   completeToolInTrace,
   completeTraceBeforeAnswer,
@@ -1600,14 +1599,6 @@ function startActivityTrace(convId: string, msgId: string): ActivityTraceRuntime
   activityTraceByConversation.set(convId, runtime);
   publishActivityTrace(convId, runtime);
   return runtime;
-}
-
-function appendActivityReasoning(convId: string, msgId: string, content: string): void {
-  if (!content) return;
-  const runtime = activityTraceByConversation.get(convId) ?? startActivityTrace(convId, msgId);
-  if (appendReasoningToTrace(runtime.trace, content)) {
-    publishActivityTrace(convId, runtime);
-  }
 }
 
 function startActivityTool(convId: string, msgId: string, toolCall: any): void {
@@ -6682,9 +6673,6 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
           activeStreamMsgId.value = msgId;
         }
         upsertAssistantMessage(convId, msgId, content);
-      },
-      onReasoningMessage: (convId, msgId, content) => {
-        appendActivityReasoning(convId, msgId, content);
       },
       onToolCallStart: (convId, msgId, toolCall) => {
         if (activeStreamMsgId.value === msgId) {

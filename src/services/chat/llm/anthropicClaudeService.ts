@@ -275,7 +275,6 @@ export class AnthropicClaudeService extends LlmService {
         }
         if (sseEvent.type === 'text') {
           assistantText += sseEvent.content;
-          options.onTextMessage(_conversationId, sseEvent.msgId!, sseEvent.content);
         }
         if (sseEvent.type === 'tool_call') {
           if (requestControl.disableTools) {
@@ -478,6 +477,8 @@ export class AnthropicClaudeService extends LlmService {
         }
         throw new EmptyAssistantResponseError();
       }
+      // Claude 也可能在 tool_use 前输出阶段性说明；仅最终无工具轮次进入聊天正文。
+      options.onTextMessage(_conversationId, msgId, assistantText);
       options.onMessageDone(_conversationId, msgId);
       return 'done';
     } catch (e) {

@@ -4,6 +4,7 @@ export const SOFT_TOOL_ROUND_LIMIT = 32;
 export const HARD_TOOL_ROUND_LIMIT = 64;
 export const STALL_WARNING_REPEAT_COUNT = 3;
 export const STALL_FINALIZE_REPEAT_COUNT = 6;
+export const DOM_SCRIPT_BATCH_WARNING_INTERVAL = 8;
 
 export interface LlmRequestControl {
   /** Omit model-visible tools for a final answer-only request. */
@@ -19,6 +20,8 @@ export interface ToolLoopState {
   repeatedRoundCount: number;
   warnedStallFingerprint?: string;
   softLimitWarned: boolean;
+  consecutiveDomScriptRounds: number;
+  lastDomScriptWarningCount: number;
 }
 
 export type ToolLoopDecision =
@@ -109,6 +112,8 @@ export function createToolLoopState(): ToolLoopState {
     totalToolCalls: 0,
     repeatedRoundCount: 0,
     softLimitWarned: false,
+    consecutiveDomScriptRounds: 0,
+    lastDomScriptWarningCount: 0,
   };
 }
 
@@ -131,6 +136,14 @@ export function recordToolRound(
 
   state.roundsCompleted += 1;
   state.totalToolCalls += toolCalls.length;
+  const executeScriptOnly = toolCalls.length > 0
+    && toolCalls.every((toolCall) => toolCall.function.name === 'browser_execute_script');
+  if (executeScriptOnly) {
+    state.consecutiveDomScriptRounds += 1;
+  } else {
+    state.consecutiveDomScriptRounds = 0;
+    state.lastDomScriptWarningCount = 0;
+  }
   if (state.lastRoundFingerprint === fingerprint) {
     state.repeatedRoundCount += 1;
   } else {
@@ -147,6 +160,16 @@ export function recordToolRound(
   }
 
   const controls: string[] = [];
+  if (
+    state.consecutiveDomScriptRounds >= DOM_SCRIPT_BATCH_WARNING_INTERVAL
+    && state.consecutiveDomScriptRounds - state.lastDomScriptWarningCount
+      >= DOM_SCRIPT_BATCH_WARNING_INTERVAL
+  ) {
+    state.lastDomScriptWarningCount = state.consecutiveDomScriptRounds;
+    controls.push(
+      `You have used browser_execute_script for ${state.consecutiveDomScriptRounds} consecutive rounds. Batch the remaining deterministic read-only DOM checks into one bounded script where possible, avoid repeating evidence already collected, and move to the final answer as soon as the essential evidence is complete.`,
+    );
+  }
   if (
     state.repeatedRoundCount >= STALL_WARNING_REPEAT_COUNT &&
     state.warnedStallFingerprint !== fingerprint

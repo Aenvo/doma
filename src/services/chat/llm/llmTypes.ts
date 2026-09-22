@@ -55,6 +55,7 @@ export interface LlmSendMessageOptions {
   skipAppendUserMessage?: boolean;
   onConversationStart: (conversationId: string) => void;
   onConversationDone: (conversationId: string, msgIds: string[]) => void;
+  /** 仅发布已确认不再调用工具的最终用户可见正文；工具轮次中的临时文本只保留在模型历史。 */
   onTextMessage: (conversationId: string, msgId: string, content: string) => void;
   /** 仅当上游 API 实际返回 reasoning_content / reasoning 时触发。 */
   onReasoningMessage?: (conversationId: string, msgId: string, content: string) => void;
