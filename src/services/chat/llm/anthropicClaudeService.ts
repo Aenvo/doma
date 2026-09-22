@@ -7,7 +7,15 @@ import {
   type ConversationMessage,
   type LlmToolCallResult,
 } from './llmTypes';
-import { LlmService } from './llmService';
+import {
+  EMPTY_RESPONSE_RECOVERY_PROMPT,
+  EmptyAssistantResponseError,
+  LlmService,
+  MAX_EMPTY_RESPONSE_RECOVERIES,
+  MAX_TOOL_ROUNDS_PER_TURN,
+  ToolRoundLimitError,
+  toolErrorPayload,
+} from './llmService';
 import { materializeToolResultContent } from './contextManager';
 import { buildBrowserAssistantSystemPromptParts } from '../slashSkills';
 import { formatSomScreenshotContext } from '../somElementsSchema';
@@ -25,7 +33,6 @@ import {
 } from '../anthropicSseFetcher';
 import type { McpClient } from '@/services/mcp/mcpClient';
 import type { LlmSendMessageOptions } from './llmTypes';
-import type { ToolResult } from '@/services/mcp/mcpServer';
 import { prepareLlmHistory } from './contextManager';
 import {
   buildAskPageToolBlockedPayload,
@@ -33,6 +40,7 @@ import {
   isAskBlockedPageTool,
   isAskModeRound,
 } from './askModeToolPolicy';
+import { callBrowserToolViaRuntime } from './browserToolRuntimeClient';
 
 type ClaudeBlock = Record<string, unknown>;
 
@@ -205,11 +213,16 @@ export class AnthropicClaudeService extends LlmService {
     options: LlmSendMessageOptions,
     msgIds: string[],
     signal: AbortSignal,
+    toolRoundDepth = 0,
+    emptyResponseRecoveries = 0,
   ): Promise<void> {
     console.log(`Calling ${this.getName()} llm with model ${this.model}`);
     const msgId = `msg-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const claudeHistory = history as ClaudeHistoryMsg[];
     try {
+      if (toolRoundDepth > MAX_TOOL_ROUNDS_PER_TURN) {
+        throw new ToolRoundLimitError();
+      }
       msgIds.push(msgId);
       options.onMessageStart(_conversationId, msgId);
       let assistantText = '';
@@ -284,75 +297,62 @@ export class AnthropicClaudeService extends LlmService {
           for (const toolCall of sseEvent.toolCalls || []) {
             if (toolCall.type !== 'function') continue;
             options.onToolCallStart(_conversationId, sseEvent.msgId!, toolCall);
-            let toolArgs: Record<string, unknown>;
+            let result: unknown;
             try {
-              toolArgs = parseToolArguments(
+              const toolArgs = parseToolArguments(
                 toolCall.function.arguments,
                 toolCall.function.name,
               );
-            } catch (parseErr) {
-              const errMsg =
-                parseErr instanceof Error ? parseErr.message : String(parseErr);
+              toolArgs.conversationId = _conversationId;
+
+              if (
+                isAskModeRound(claudeHistory) &&
+                isAskBlockedPageTool(toolCall.function.name, toolArgs)
+              ) {
+                result = buildAskPageToolBlockedPayload(
+                  toolCall.function.name,
+                  getLastUserVisibleGoal(claudeHistory),
+                );
+              } else {
+                const timeoutMs =
+                  typeof toolArgs.timeoutMs === 'number' &&
+                  Number.isFinite(toolArgs.timeoutMs)
+                    ? Math.max(1, Math.floor(toolArgs.timeoutMs))
+                    : 60_000;
+                result = await callBrowserToolViaRuntime(
+                  toolCall.function.name,
+                  toolArgs,
+                  timeoutMs,
+                  signal,
+                );
+              }
+            } catch (toolError) {
+              if ((toolError as { name?: string })?.name === 'AbortError' || signal.aborted) {
+                throw toolError;
+              }
+              console.warn('[Anthropic] Tool call failed; returning error to model', {
+                conversationId: _conversationId,
+                toolName: toolCall.function.name,
+                error: toolError instanceof Error ? toolError.message : String(toolError),
+              });
+              result = toolErrorPayload(toolCall.function.name, toolError);
+            }
+
+            try {
+              const overrideResult = await options.onToolCallOverride(
+                _conversationId,
+                sseEvent.msgId!,
+                toolCall,
+                result,
+              );
               llmToolCallResults.push({
                 tool_call_id: toolCall.id,
-                result: {
-                  content: [
-                    {
-                      type: 'text',
-                      text: JSON.stringify({ ok: false, error: errMsg }),
-                    },
-                  ],
-                },
+                result: overrideResult ?? result,
                 name: toolCall.function.name,
               });
+            } finally {
               options.onToolCallDone(_conversationId, sseEvent.msgId!, toolCall);
-              continue;
             }
-            toolArgs.conversationId = _conversationId;
-
-            let result: unknown;
-            if (
-              isAskModeRound(claudeHistory) &&
-              isAskBlockedPageTool(toolCall.function.name, toolArgs)
-            ) {
-              result = buildAskPageToolBlockedPayload(
-                toolCall.function.name,
-                getLastUserVisibleGoal(claudeHistory),
-              );
-            } else {
-              const timeoutMs =
-                typeof toolArgs.timeoutMs === 'number' &&
-                Number.isFinite(toolArgs.timeoutMs)
-                  ? Math.max(1, Math.floor(toolArgs.timeoutMs))
-                  : 60_000;
-              const toolResult = (await this.mcpClient.callTool(
-                {
-                  name: toolCall.function.name,
-                  arguments: toolArgs,
-                },
-                undefined,
-                { timeout: timeoutMs, maxTotalTimeout: timeoutMs },
-              )) as ToolResult;
-              const firstContent = toolResult.content[0];
-              const firstText =
-                firstContent && firstContent.type === 'text' ? firstContent.text : '';
-              result = firstText.startsWith('__JSON__')
-                ? JSON.parse(firstText.slice(8))
-                : firstText;
-            }
-
-            const overrideResult = await options.onToolCallOverride(
-              _conversationId,
-              sseEvent.msgId!,
-              toolCall,
-              result,
-            );
-            llmToolCallResults.push({
-              tool_call_id: toolCall.id,
-              result: overrideResult || result,
-              name: toolCall.function.name,
-            });
-            options.onToolCallDone(_conversationId, sseEvent.msgId!, toolCall);
           }
 
           await this.processToolResults(
@@ -376,6 +376,8 @@ export class AnthropicClaudeService extends LlmService {
             options,
             msgIds,
             signal,
+            toolRoundDepth + 1,
+            emptyResponseRecoveries,
           );
           return;
         }
@@ -384,6 +386,42 @@ export class AnthropicClaudeService extends LlmService {
       if (assistantText) {
         claudeHistory.push({ role: 'assistant', content: assistantText });
       }
+      if (!assistantText.trim()) {
+        options.onMessageDone(_conversationId, msgId);
+        if (
+          emptyResponseRecoveries < MAX_EMPTY_RESPONSE_RECOVERIES &&
+          !signal.aborted
+        ) {
+          console.warn('[Anthropic] Empty final response; retrying once', {
+            conversationId: _conversationId,
+          });
+          const recoveryMessage: ClaudeHistoryMsg = {
+            role: 'user',
+            content: EMPTY_RESPONSE_RECOVERY_PROMPT,
+          };
+          claudeHistory.push(recoveryMessage);
+          try {
+            await this.call(
+              _conversationId,
+              userId,
+              deviceId,
+              site,
+              ever,
+              claudeHistory,
+              options,
+              msgIds,
+              signal,
+              toolRoundDepth,
+              emptyResponseRecoveries + 1,
+            );
+          } finally {
+            const recoveryIndex = claudeHistory.indexOf(recoveryMessage);
+            if (recoveryIndex >= 0) claudeHistory.splice(recoveryIndex, 1);
+          }
+          return;
+        }
+        throw new EmptyAssistantResponseError();
+      }
       options.onMessageDone(_conversationId, msgId);
     } catch (e) {
       if ((e as { name?: string })?.name === 'AbortError' || signal?.aborted) {
@@ -391,7 +429,7 @@ export class AnthropicClaudeService extends LlmService {
         return;
       }
       console.error(`[${this.getName()}] API call failed:`, e);
-      options.onMessageError(_conversationId, msgId, e as Error);
+      await options.onMessageError(_conversationId, msgId, e as Error);
     }
   }
 
@@ -557,21 +595,30 @@ export class AnthropicClaudeService extends LlmService {
 
     const last = h[lastAssistantIndex];
     const blocks = Array.isArray(last.content) ? last.content : [];
-    const hasToolUse = blocks.some((b) => b.type === 'tool_use');
-    if (!hasToolUse) return;
+    const expectedIds = new Set(
+      blocks
+        .filter((block) => block.type === 'tool_use')
+        .map((block) => typeof block.id === 'string' ? block.id : '')
+        .filter(Boolean),
+    );
+    if (expectedIds.size === 0) return;
 
-    let hasToolResult = false;
+    const respondedIds = new Set<string>();
     for (let i = lastAssistantIndex + 1; i < h.length; i++) {
       const c = h[i].content;
       if (h[i].role === 'user' && Array.isArray(c)) {
-        if (c.some((b) => b.type === 'tool_result')) {
-          hasToolResult = true;
-          break;
+        for (const block of c) {
+          if (block.type === 'tool_result' && typeof block.tool_use_id === 'string') {
+            respondedIds.add(block.tool_use_id);
+          }
         }
       }
     }
-    if (!hasToolResult) {
-      console.log('[Anthropic] Removing incomplete tool_use from history');
+    if ([...expectedIds].some((id) => !respondedIds.has(id))) {
+      console.log('[Anthropic] Removing incomplete tool_use from history', {
+        expected: [...expectedIds],
+        responded: [...respondedIds],
+      });
       h.splice(lastAssistantIndex, h.length - lastAssistantIndex);
     }
   }

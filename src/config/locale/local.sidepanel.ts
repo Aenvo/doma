@@ -357,6 +357,8 @@ export default {
       },
       requestTimeoutRetry: "Request timed out. Please try again.",
       requestBusyRetry: "I'm a bit busy right now. Please try again shortly.",
+      emptyResponseRetry: "The model finished thinking but returned no final answer. Please retry this turn.",
+      toolRoundLimitReached: "The task stopped after too many tool rounds. Please narrow the request and retry.",
       accountPanel: {
         mailLabel: "Mail",
         copyInviteCode: "Copy invite code",
@@ -827,6 +829,8 @@ export default {
       },
       requestTimeoutRetry: "请求超时，请重试",
       requestBusyRetry: "现在有点忙，请稍后再试",
+      emptyResponseRetry: "模型已结束思考，但没有返回最终答案，请重试本轮",
+      toolRoundLimitReached: "任务的工具调用轮次过多，已停止。请缩小任务范围后重试",
       accountPanel: {
         mailLabel: "Mail",
         copyInviteCode: "复制邀请码",

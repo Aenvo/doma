@@ -1,19 +1,15 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { type Tool } from "@modelcontextprotocol/sdk/types.js";
+import { getOpenAICompatibleTools } from "@/services/chat/llm/toolsDefinition";
 export class McpClient extends Client {
     private llmTools: any[] | undefined = undefined
  
     async getLlmTools(){
      if (this.llmTools) return this.llmTools;
-     this.llmTools = (await this.listTools()).tools.map(tool => ({
-         type: "function",
-         function: {
-             name: tool.name,
-             description: tool.description,
-             parameters: tool.inputSchema
-         }
-       }));
+     // Tool definitions live in this extension bundle. Reading them locally avoids
+     // a broadcast MCP listTools round-trip that can be lost when the side panel or
+     // service worker is reloaded.
+     this.llmTools = [...getOpenAICompatibleTools()];
      return this.llmTools;
     }
 

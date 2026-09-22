@@ -1,5 +1,6 @@
 import fs from 'fs';
 import { resolve } from 'path';
+import { normalizePath } from 'vite';
 
 interface InputSource{
     input: string;
@@ -85,26 +86,26 @@ export const copyFilesConfig = (OUTPUT_DIR:string, platformName:string, browserN
       : resolve(manifestDir, 'manifest.json');
     const targets = [
         {
-            src: manifest,
+            src: normalizePath(manifest),
             dest: resolve(`${OUTPUT_DIR}/`),
             rename: 'manifest.json',
         },
         {
-            src: resolve('src/assets/extension-img'),
+            src: normalizePath(resolve('src/assets/extension-img')),
             dest: resolve(`${OUTPUT_DIR}/`),
             rename: 'extension-img',
         },
         {
-            src: resolve('src/assets/favicon.ico'),
+            src: normalizePath(resolve('src/assets/favicon.ico')),
             dest: resolve(`${OUTPUT_DIR}/`),
             rename: 'favicon.ico',
         },
         {
-            src: resolve(`src/resources/_locales`),
+            src: normalizePath(resolve(`src/resources/_locales`)),
             dest: resolve(`${OUTPUT_DIR}/`)
         },
         {
-            src: resolve(`src/resources/config`),
+            src: normalizePath(resolve(`src/resources/config`)),
             dest: resolve(OUTPUT_DIR + '/source/dark')
         }
     ];
@@ -118,7 +119,7 @@ export const copyFilesConfig = (OUTPUT_DIR:string, platformName:string, browserN
       const pathMatch = key.match(pathRegex) || '';
       const path = pathMatch ? pathMatch[1] : '';
       targets.push({
-        src: libConfigMap[key],
+        src: normalizePath(resolve(libConfigMap[key])),
         dest: resolve(OUTPUT_DIR + '/source/'+ path)
       });
     });

@@ -32,6 +32,13 @@ interface CompatibleMessage extends ConversationMessage {
   fileId?: string;
 }
 
+function maxOutputTokensForModel(model: string): number {
+  const normalized = model.toLowerCase();
+  return /(deepseek|reasoner|(?:^|[-_/])r1(?:$|[-_/])|thinking|qwq|qwen3)/.test(normalized)
+    ? 8192
+    : 4096;
+}
+
 export class OpenAICompatibleService extends LlmService {
   private completionsUrl: string;
   private displayName: string;
@@ -98,7 +105,7 @@ export class OpenAICompatibleService extends LlmService {
       model: this.model,
       messages,
       tools,
-      max_tokens: 4096,
+      max_tokens: maxOutputTokensForModel(this.model),
       stream: true,
       ...this.extraBody,
     };
@@ -128,6 +135,12 @@ export class OpenAICompatibleService extends LlmService {
   ) {
     this.conversationHistory.set(conversationId, history);
 
+    // OpenAI-compatible APIs require one `tool` message for every tool_call before
+    // any later user message. Image/screenshot context is therefore deferred until
+    // every tool result has been paired.
+    const toolMessages: CompatibleMessage[] = [];
+    const supplementalUserMessages: CompatibleMessage[] = [];
+
     for (const toolResult of toolResults) {
       const result = toolResult.result as any;
       if (result && typeof result === 'object' && 'base64' in result && 'mimeType' in result && 'captureTab' in result && result.captureTab === true) {
@@ -139,12 +152,11 @@ export class OpenAICompatibleService extends LlmService {
           areas?: unknown[];
         };
 
-        const toolResultMsg: CompatibleMessage = {
+        toolMessages.push({
           role: 'tool',
           tool_call_id: toolResult.tool_call_id,
           content: '截图已获取，正在分析...',
-        };
-        history.push(toolResultMsg);
+        });
 
         let screenshotText =
           '请分析这个网页截图，描述你看到的主要内容、页面布局和可交互的元素。结合之前的任务目标给出操作建议。';
@@ -157,7 +169,7 @@ export class OpenAICompatibleService extends LlmService {
           screenshotText = `${screenshotText}\n${resultMap.hint.trim()}`;
         }
 
-        const imageMsg: CompatibleMessage = {
+        supplementalUserMessages.push({
           role: 'user',
           expiredInNextRound: true,
           expireKind: 'screenshot',
@@ -173,8 +185,7 @@ export class OpenAICompatibleService extends LlmService {
               text: screenshotText,
             },
           ],
-        };
-        history.push(imageMsg);
+        });
       } else if (
         toolResult.name === 'browser_get_video_caption'
         && result
@@ -182,16 +193,27 @@ export class OpenAICompatibleService extends LlmService {
         && (result as { ok?: boolean }).ok === true
         && 'caption' in (result as object)
       ) {
-        const toolResultMsg: CompatibleMessage = {
+        toolMessages.push({
           role: 'tool',
           tool_call_id: toolResult.tool_call_id,
           expiredInNextRound: true,
           expireKind: 'caption',
           content: JSON.stringify(result),
-        };
-        history.push(toolResultMsg);
+        });
       } else if (result && typeof result === 'object' && 'kind' in result && result.kind === 'binary' && 'type' in result && result.type === 'file') {
-        const imageMsg: CompatibleMessage = {
+        toolMessages.push({
+          role: 'tool',
+          tool_call_id: toolResult.tool_call_id,
+          content: JSON.stringify({
+            ok: true,
+            kind: 'binary',
+            type: 'file',
+            name: result.name,
+            mimeType: result.mimeType,
+            fileId: result.fileId,
+          }),
+        });
+        supplementalUserMessages.push({
           role: 'user',
           content: [
             {
@@ -206,10 +228,14 @@ export class OpenAICompatibleService extends LlmService {
             },
           ],
           fileId: typeof result.fileId === 'string' ? result.fileId : undefined,
-        };
-        history.push(imageMsg);
+        });
       } else if (result && typeof result === 'object' && 'imageRecognition' in result && result.imageRecognition === true) {
-        const imageMsg: CompatibleMessage = {
+        toolMessages.push({
+          role: 'tool',
+          tool_call_id: toolResult.tool_call_id,
+          content: JSON.stringify({ ok: true, imageRecognition: true }),
+        });
+        supplementalUserMessages.push({
           role: 'user',
           content: [
             {
@@ -224,20 +250,20 @@ export class OpenAICompatibleService extends LlmService {
             },
           ],
           fileId: typeof result.fileId === 'string' ? result.fileId : undefined,
-        };
-        history.push(imageMsg);
+        });
       } else {
         const content = await materializeToolResultContent(conversationId, result, {
           toolName: toolResult.name,
         });
-        const toolResultMsg: CompatibleMessage = {
+        toolMessages.push({
           role: 'tool',
           tool_call_id: toolResult.tool_call_id,
           content,
-        };
-        history.push(toolResultMsg);
+        });
       }
     }
+
+    history.push(...toolMessages, ...supplementalUserMessages);
   }
 
   protected cleanupIncompleteToolCalls(history: CompatibleMessage[]): void {
@@ -256,16 +282,32 @@ export class OpenAICompatibleService extends LlmService {
     const lastAssistant = history[lastAssistantIndex];
 
     if (lastAssistant.tool_calls && lastAssistant.tool_calls.length > 0) {
-      let hasToolResponse = false;
+      const expectedIds = new Set(
+        lastAssistant.tool_calls
+          .map((toolCall) => {
+            if (!toolCall || typeof toolCall !== 'object') return '';
+            const id = (toolCall as { id?: unknown }).id;
+            return typeof id === 'string' ? id : '';
+          })
+          .filter(Boolean),
+      );
+      const respondedIds = new Set<string>();
       for (let i = lastAssistantIndex + 1; i < history.length; i++) {
-        if (history[i].role === 'tool') {
-          hasToolResponse = true;
-          break;
+        const message = history[i];
+        if (message.role === 'assistant') break;
+        if (message.role === 'tool' && typeof message.tool_call_id === 'string') {
+          respondedIds.add(message.tool_call_id);
         }
       }
 
-      if (!hasToolResponse) {
-        console.log('[OpenAICompatible] Removing incomplete tool_calls from history');
+      const incomplete =
+        expectedIds.size === 0 ||
+        [...expectedIds].some((id) => !respondedIds.has(id));
+      if (incomplete) {
+        console.log('[OpenAICompatible] Removing incomplete tool_calls from history', {
+          expected: [...expectedIds],
+          responded: [...respondedIds],
+        });
         history.splice(lastAssistantIndex, history.length - lastAssistantIndex);
       }
     }

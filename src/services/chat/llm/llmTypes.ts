@@ -2,8 +2,6 @@
  * LLM 服务的通用类型定义
  */
 
-import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import type { ToolResult } from '@/services/mcp/mcpServer';
 export type LlmProvider =
   | 'gemini'
   | 'claude'
@@ -34,7 +32,8 @@ export interface LlmResponse {
 
 export interface LlmToolCallResult {
   tool_call_id: string;
-  result: ToolResult;
+  /** Normalized tool payload returned to the model (object, text, image/file descriptor, or error). */
+  result: unknown;
   name: string;
 }
 
@@ -60,11 +59,20 @@ export interface LlmSendMessageOptions {
   /** 仅当上游 API 实际返回 reasoning_content / reasoning 时触发。 */
   onReasoningMessage?: (conversationId: string, msgId: string, content: string) => void;
   onToolCallStart: (conversationId: string, msgId: string, toolCall: any) => void;
-  onToolCallOverride: (conversationId: string, msgId: string, toolCall: any, toolResult: ToolResult) => Promise<ToolResult | undefined>;
+  onToolCallOverride: (
+    conversationId: string,
+    msgId: string,
+    toolCall: any,
+    toolResult: unknown,
+  ) => Promise<unknown | undefined>;
   onToolCallDone: (conversationId: string, msgId: string, toolCall: any) => void;
   onMessageStart: (conversationId: string, msgId: string) => void;
   onMessageDone: (conversationId: string, msgId: string) => void;
-  onMessageError: (conversationId: string, msgId: string, error: Error) => void;
+  onMessageError: (
+    conversationId: string,
+    msgId: string,
+    error: Error,
+  ) => void | Promise<void>;
   /**
    * 一轮 tool 结果写完 history 后调用。
    * 返回 true 则不再递归 call（用于上下文总结后截断）。

@@ -1024,7 +1024,10 @@ import DbPlusSvg from "@/assets/images/db-plus.svg";
 import McpLinkSvg from "@/assets/images/mcp-link.svg";
 import ConnectorPanel from "@/components/chat/ConnectorPanel.vue";
 import { getLocalizedString } from "@/services/extensionService";
-import { isHttpError } from "@/services/chat/sseFetcher";
+import {
+  isHttpError,
+  isSseIdleTimeoutError,
+} from "@/services/chat/sseFetcher";
 const domaIconMaskStyle = {
   maskImage: `url("${domaIconMaskUrl}")`,
   WebkitMaskImage: `url("${domaIconMaskUrl}")`,
@@ -1680,6 +1683,9 @@ function transferConversationRuntimeState(fromId: string, toId: string) {
     abortControllersByConversation.delete(fromId);
     abortControllersByConversation.set(toId, controller);
   }
+  if (cancelledConversationIds.delete(fromId)) {
+    cancelledConversationIds.add(toId);
+  }
 }
 
 const loading = computed(() => isConversationLoading(conversationId.value));
@@ -1693,7 +1699,8 @@ const expandedToolCalls = ref<Set<string>>(new Set());
 const toolDebug = ref(false);
 const isTabRecording = ref(false);
 const copiedToolBarKeys = ref<Set<string>>(new Set());
-const cancelled = ref(false);
+/** Cancellation is conversation-scoped; concurrent/off-panel turns must not poison each other. */
+const cancelledConversationIds = new Set<string>();
 const conversationId = ref<string | undefined>(undefined);
 
 const activeBrowserPlanSteps = computed(() =>
@@ -4438,9 +4445,14 @@ watch(userBubbleMinimapEl, (el, prev) => {
 
 async function stopTask(
   message?: string | Event,
-  options?: { skipAssistantMessage?: boolean },
+  options?: {
+    skipAssistantMessage?: boolean;
+    conversationId?: string;
+    status?: "stopped" | "error";
+  },
 ) {
-  const cid = conversationId.value;
+  const cid = options?.conversationId ?? conversationId.value;
+  const status = options?.status ?? "stopped";
   try {
     if (cid) abortControllersByConversation.get(cid)?.abort();
   } catch {
@@ -4450,9 +4462,12 @@ async function stopTask(
     abortControllersByConversation.delete(cid);
     setConversationLoading(cid, false);
     setConversationThinking(cid, false);
-    finishActivityTrace(cid, "stopped");
+    finishActivityTrace(cid, status);
   }
-  cancelled.value = true;
+  if (cid) {
+    if (status === "stopped") cancelledConversationIds.add(cid);
+    else cancelledConversationIds.delete(cid);
+  }
   const msg = typeof message === "string" ? message : undefined;
   if (cid && !options?.skipAssistantMessage) {
     await addMessage(cid, "assistant", msg || t("chat.taskStopped"));
@@ -4475,7 +4490,7 @@ async function abortTask() {
     setConversationThinking(cid, false);
     finishActivityTrace(cid, "stopped");
   }
-  cancelled.value = true;
+  if (cid) cancelledConversationIds.add(cid);
 }
 
 onMounted(async () => {
@@ -6477,7 +6492,6 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
   }
 
   if (typeof userText !== "string" && dockComposer.binding.value.hasPendingUploadFiles) return;
-  cancelled.value = false;
   // MCP 外部任务：normalize 会保留 attachedFiles 等富上下文，只重建 mcpCall 块
   let text: string;
   if (hasInteractionBlockMcpCallTag(rawText)) {
@@ -6557,6 +6571,7 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
 
   const persistConvId = opts?.conversationId ?? conversationId.value!;
   if (!persistConvId) return;
+  cancelledConversationIds.delete(persistConvId);
 
   // 用量触顶：先隐藏总结回合，stash 用户原文，总结后再重放
   if (!opts?.skipSummarizeGate && !opts?.summarizeTurn && !opts?.resend) {
@@ -6653,7 +6668,7 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
       persistConvId,
       stripInteractionBlocksForHistoryUi(rawText).trim() || rawText.trim(),
     );
-    llmManager.sendMessage(
+    await llmManager.sendMessage(
       persistConvId,
       llmSendText, {
       skipAppendUserMessage: isResend,
@@ -6705,7 +6720,7 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
           } else {
             openProUpgradeActionModal();
           }
-          stopTask();
+          void stopTask(undefined, { conversationId: convId });
         }
         else{
           if (toolCall.function.name === 'browser_find_videos') {
@@ -6715,7 +6730,9 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
             }
 
             if ((result as any).ok && (result as any).count > 0) {
-              stopTask(t("chat.video.selectToDownload", { count: (result as any).count }));
+              void stopTask(t("chat.video.selectToDownload", { count: (result as any).count }), {
+                conversationId: convId,
+              });
             }
             else{
                 return result;
@@ -6728,7 +6745,9 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
             }
 
             if ((result as any).ok && (result as any).userscriptList.length > 0) {
-              stopTask(t("chat.userscript.selectToInstall", { count: (result as any).userscriptList.length }));
+              void stopTask(t("chat.userscript.selectToInstall", { count: (result as any).userscriptList.length }), {
+                conversationId: convId,
+              });
             }
             else{
               return result;
@@ -6743,7 +6762,10 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
             const activatedCount = Array.isArray((result as any).activated) ? (result as any).activated.length : 0;
             const stoppedCount = Array.isArray((result as any).stopped) ? (result as any).stopped.length : 0;
             if ((result as any).ok && activatedCount + stoppedCount > 0) {
-              await stopTask(undefined, { skipAssistantMessage: true });
+              await stopTask(undefined, {
+                skipAssistantMessage: true,
+                conversationId: convId,
+              });
             } else {
               return result;
             }
@@ -6759,7 +6781,10 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
             if (customUI) {
               upsertAssistantMessage(convId, msgId, '', undefined, customUI);
             }
-            await stopTask(undefined, { skipAssistantMessage: true });
+            await stopTask(undefined, {
+              skipAssistantMessage: true,
+              conversationId: convId,
+            });
           }
         }
         
@@ -6819,9 +6844,12 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
       },
       onConversationDone: (convId, msgIds) => {
         console.log("[tool debug] onConversationDone", { convId, msgIds });
-        activeStreamMsgId.value = null;
+        if (activeStreamMsgId.value && msgIds.includes(activeStreamMsgId.value)) {
+          activeStreamMsgId.value = null;
+        }
+        const wasCancelled = cancelledConversationIds.delete(convId);
         const lastMsgId = msgIds[msgIds.length - 1];
-        finishActivityTrace(convId, cancelled.value ? "stopped" : "completed");
+        finishActivityTrace(convId, wasCancelled ? "stopped" : "completed");
         setConversationLoading(convId, false);
         setConversationThinking(convId, false);
         abortControllersByConversation.delete(convId);
@@ -6853,7 +6881,7 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
             toolNames,
             textOnly: toolCallCount === 0,
             msgCount: msgIds.length,
-            cancelled: cancelled.value,
+            cancelled: wasCancelled,
           });
         }
 
@@ -6869,7 +6897,7 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
           } else {
             void flushAllMessagePersists().then(() => clearDoingToolCallsInIdb(msgIds));
           }
-          if (cancelled.value) {
+          if (wasCancelled) {
             reportMcpOnce(false, t("chat.taskStopped"), "error");
             void recordScheduledRunResult(convId, msgIds, "cancelled", t("chat.taskStopped"));
             return;
@@ -6890,7 +6918,7 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
           return;
         }
 
-        if (cancelled.value) {
+        if (wasCancelled) {
           reportMcpOnce(false, t("chat.taskStopped"), "error");
           void recordScheduledRunResult(convId, msgIds, "cancelled", t("chat.taskStopped"));
           if (onPanel) {
@@ -6947,36 +6975,60 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
         };
         void finishTurn();
       },
-      onMessageError: async (conversationId, msgId, error) => {
-        finishActivityTrace(conversationId, "error");
+      onMessageError: async (errorConversationId, msgId, error) => {
+        finishActivityTrace(errorConversationId, "error");
+        const stopErroredConversation = (message: string) =>
+          stopTask(message, {
+            conversationId: errorConversationId,
+            status: "error",
+          });
+        const reportTerminalError = (text: string) => {
+          reportMcpOnce(false, text, "error");
+          void recordScheduledRunResult(
+            errorConversationId,
+            msgId ? [msgId] : [],
+            "error",
+            text,
+          );
+        };
+
+        if (isSseIdleTimeoutError(error)) {
+          const message = t("chat.requestTimeoutRetry");
+          reportTerminalError(message);
+          await stopErroredConversation(message);
+          return;
+        }
+        if (error.name === "EmptyAssistantResponseError") {
+          const message = t("chat.emptyResponseRetry");
+          reportTerminalError(message);
+          await stopErroredConversation(message);
+          return;
+        }
+        if (error.name === "ToolRoundLimitError") {
+          const message = t("chat.toolRoundLimitReached");
+          reportTerminalError(message);
+          await stopErroredConversation(message);
+          return;
+        }
         if (isHttpError(error)) {
           await sendEdition.handleHttpError(
             { status: error.status, message: error.message },
             {
-              conversationId,
+              conversationId: errorConversationId,
               msgId,
               t: (key) => t(key),
-              reportError: (text) => {
-                reportMcpOnce(false, text, "error");
-                void recordScheduledRunResult(
-                  conversationId,
-                  msgId ? [msgId] : [],
-                  "error",
-                  text,
-                );
-              },
-              stopTask,
+              reportError: reportTerminalError,
+              stopTask: stopErroredConversation,
             },
           );
           return;
         }
-        reportMcpOnce(false, error.message, "error");
-        void recordScheduledRunResult(conversationId, msgId ? [msgId] : [], "error", error.message);
-        stopTask(error.message);
+        reportTerminalError(error.message);
+        await stopErroredConversation(error.message);
       }
     }, abortController.signal, { siteHost: site });
   } catch (e) {
-    if (!cancelled.value) {
+    if (!cancelledConversationIds.has(persistConvId)) {
       await addMessage(
         persistConvId,
         "assistant",
