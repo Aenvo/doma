@@ -12,8 +12,16 @@ import {
   isAskModeRound,
 } from "./askModeToolPolicy";
 import { callBrowserToolViaRuntime } from "./browserToolRuntimeClient";
+import {
+  HARD_TOOL_ROUND_LIMIT,
+  createToolLoopState,
+  finalAnswerControlInstruction,
+  recordToolRound,
+  type LlmRequestControl,
+  type ToolLoopState,
+} from "./toolLoopGuard";
 
-export const MAX_TOOL_ROUNDS_PER_TURN = 32;
+export const MAX_TOOL_ROUNDS_PER_TURN = HARD_TOOL_ROUND_LIMIT;
 export const MAX_EMPTY_RESPONSE_RECOVERIES = 1;
 export const EMPTY_RESPONSE_RECOVERY_PROMPT =
   "The previous attempt ended without a final answer. Respond to the original user request now with a concise final answer. Do not call another tool unless it is strictly necessary.";
@@ -31,6 +39,8 @@ export class ToolRoundLimitError extends Error {
     this.name = "ToolRoundLimitError";
   }
 }
+
+export type LlmCallOutcome = "done" | "aborted" | "error";
 
 export function toolErrorPayload(toolName: string, error: unknown): Record<string, unknown> {
   const message = error instanceof Error ? error.message : String(error);
@@ -76,6 +86,7 @@ export class LlmService {
       site: string,
       ever: string,
       history: ConversationMessage[],
+      _requestControl: LlmRequestControl = {},
     ): Promise<RequestInit> {
         return {}
     }
@@ -150,8 +161,20 @@ export class LlmService {
         // this.conversationHistory.set(conversationId, history);
     
         const msgIds: string[] = [];
-        await this.call(conversationId, userId, deviceId, site, ever, history, options, msgIds, signal);
-        options.onConversationDone(conversationId, msgIds);
+        const outcome = await this.call(
+          conversationId,
+          userId,
+          deviceId,
+          site,
+          ever,
+          history,
+          options,
+          msgIds,
+          signal,
+        );
+        if (outcome !== "error") {
+          options.onConversationDone(conversationId, msgIds);
+        }
     }
 
     protected manageContext(history: ConversationMessage[]): ConversationMessage[] {
@@ -199,15 +222,13 @@ export class LlmService {
         options: LlmSendMessageOptions,
         msgIds: string[],
         signal: AbortSignal,
-        toolRoundDepth = 0,
+        toolLoopState: ToolLoopState = createToolLoopState(),
         emptyResponseRecoveries = 0,
-    ): Promise<void> {
+        requestControl: LlmRequestControl = {},
+    ): Promise<LlmCallOutcome> {
         console.log(`Calling ${this.getName()} llm with model ${this.model}`);
         const msgId = `msg-${Date.now()}-${Math.random().toString(36).slice(2)}`;
         try{
-            if (toolRoundDepth > MAX_TOOL_ROUNDS_PER_TURN) {
-              throw new ToolRoundLimitError();
-            }
             msgIds.push(msgId);
             options.onMessageStart(_conversationId, msgId);
             let assistantText = '';
@@ -215,7 +236,20 @@ export class LlmService {
             let finishReason = '';
             let sawToolCall = false;
             await prepareLlmHistory(history as Parameters<typeof prepareLlmHistory>[0], _conversationId);
-            for await (const sseEvent of fetchSSE(this.endPoint(), await this.fetchOptions(_conversationId, userId, deviceId, site, ever, history), msgId, signal)) {
+            for await (const sseEvent of fetchSSE(
+              this.endPoint(),
+              await this.fetchOptions(
+                _conversationId,
+                userId,
+                deviceId,
+                site,
+                ever,
+                history,
+                requestControl,
+              ),
+              msgId,
+              signal,
+            )) {
               if (sseEvent.type === 'usage' && sseEvent.usage) {
                 applyLlmUsage(_conversationId, sseEvent.usage);
                 console.log("[usage debug] onUsage", {
@@ -241,6 +275,9 @@ export class LlmService {
                 finishReason = sseEvent.finishReason;
               }
               if (sseEvent.type === 'tool_call') {
+                if (requestControl.disableTools) {
+                  throw new ToolRoundLimitError();
+                }
                 sawToolCall = true;
                 // assistant 的 tool_calls 消息必须在 tool result 之前加入历史
                 history.push({
@@ -332,9 +369,42 @@ export class LlmService {
                   llmToolCallResults,
                 );
                 if (halt) {
-                  return;
+                  return "done";
                 }
-                await this.call(
+                const decision = recordToolRound(
+                  toolLoopState,
+                  sseEvent.toolCalls!,
+                  llmToolCallResults,
+                );
+                if (decision.kind === "finalize") {
+                  console.warn(`[${this.getName()}] Finalizing tool loop`, {
+                    conversationId: _conversationId,
+                    reason: decision.reason,
+                    roundsCompleted: toolLoopState.roundsCompleted,
+                    totalToolCalls: toolLoopState.totalToolCalls,
+                  });
+                  return await this.call(
+                    _conversationId,
+                    userId,
+                    deviceId,
+                    site,
+                    ever,
+                    history,
+                    options,
+                    msgIds,
+                    signal,
+                    toolLoopState,
+                    emptyResponseRecoveries,
+                    {
+                      disableTools: true,
+                      controlInstruction: finalAnswerControlInstruction(
+                        toolLoopState,
+                        decision.reason,
+                      ),
+                    },
+                  );
+                }
+                return await this.call(
                   _conversationId,
                   userId,
                   deviceId,
@@ -344,10 +414,12 @@ export class LlmService {
                   options,
                   msgIds,
                   signal,
-                  toolRoundDepth + 1,
+                  toolLoopState,
                   emptyResponseRecoveries,
+                  decision.controlInstruction
+                    ? { controlInstruction: decision.controlInstruction }
+                    : {},
                 );
-                return;
               }
             }
 
@@ -377,7 +449,7 @@ export class LlmService {
                 };
                 history.push(recoveryMessage);
                 try {
-                  await this.call(
+                  return await this.call(
                     _conversationId,
                     userId,
                     deviceId,
@@ -387,29 +459,30 @@ export class LlmService {
                     options,
                     msgIds,
                     signal,
-                    toolRoundDepth,
+                    toolLoopState,
                     emptyResponseRecoveries + 1,
+                    requestControl,
                   );
                 } finally {
                   const recoveryIndex = history.indexOf(recoveryMessage);
                   if (recoveryIndex >= 0) history.splice(recoveryIndex, 1);
                 }
-                return;
               }
               throw new EmptyAssistantResponseError();
             }
 
             options.onMessageDone(_conversationId, msgId);
-            return;
+            return "done";
           }
           catch (e) {
             // 用户主动 abort 时，不应当作为错误噪音输出，也不应当让上层认为“崩溃”
             if ((e as any)?.name === 'AbortError' || signal?.aborted) {
               console.log(`[${this.getName()}] Request aborted`);
-              return;
+              return "aborted";
             }
             console.error(`[${this.getName()}] API call failed:`, e);
             await options.onMessageError(_conversationId, msgId, e as Error);
+            return "error";
           }
     }
 

@@ -6976,6 +6976,10 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
         void finishTurn();
       },
       onMessageError: async (errorConversationId, msgId, error) => {
+        if (activeStreamMsgId.value === msgId) {
+          activeStreamMsgId.value = null;
+        }
+        setConversationThinking(errorConversationId, false);
         finishActivityTrace(errorConversationId, "error");
         const stopErroredConversation = (message: string) =>
           stopTask(message, {

@@ -10,6 +10,10 @@ import {
 } from './llmTypes';
 import { LlmService } from './llmService';
 import {
+  appendRuntimeControl,
+  type LlmRequestControl,
+} from './toolLoopGuard';
+import {
   materializeToolResultContent,
 } from './contextManager';
 import { buildBrowserAssistantSystemPromptParts } from '../slashSkills';
@@ -83,12 +87,23 @@ export class OpenAICompatibleService extends LlmService {
     _site: string,
     _ever: string,
     history: CompatibleMessage[],
+    requestControl: LlmRequestControl = {},
   ): Promise<RequestInit> {
     const { systemContent, basePrompt, skillSection } =
       await buildBrowserAssistantSystemPromptParts(BROWSER_ASSISTANT_SYSTEM_PROMPT);
-    const tools = [...(await this.mcpClient.getLlmTools())];
+    const controlledSystemContent = appendRuntimeControl(
+      systemContent,
+      requestControl,
+    );
+    const tools = requestControl.disableTools
+      ? []
+      : [...(await this.mcpClient.getLlmTools())];
     armTurnUsageFixed(conversationId, {
-      system: estimateTextTokens(basePrompt),
+      system: estimateTextTokens(
+        requestControl.controlInstruction
+          ? `${basePrompt}\n${requestControl.controlInstruction}`
+          : basePrompt,
+      ),
       skills: estimateTextTokens(skillSection),
       tools: estimateJsonTokens(tools),
       summarized: estimateSummarizedInHistory(history),
@@ -96,7 +111,7 @@ export class OpenAICompatibleService extends LlmService {
     const messages: CompatibleMessage[] = [
       {
         role: 'system',
-        content: systemContent,
+        content: controlledSystemContent,
       },
       ...history,
     ];
@@ -104,10 +119,12 @@ export class OpenAICompatibleService extends LlmService {
     const requestBody = {
       model: this.model,
       messages,
-      tools,
       max_tokens: maxOutputTokensForModel(this.model),
       stream: true,
       ...this.extraBody,
+      ...(requestControl.disableTools
+        ? { tools: undefined, tool_choice: undefined }
+        : { tools }),
     };
 
     const headers: Record<string, string> = {

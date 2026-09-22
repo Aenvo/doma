@@ -10,12 +10,20 @@ import {
 import {
   EMPTY_RESPONSE_RECOVERY_PROMPT,
   EmptyAssistantResponseError,
+  type LlmCallOutcome,
   LlmService,
   MAX_EMPTY_RESPONSE_RECOVERIES,
-  MAX_TOOL_ROUNDS_PER_TURN,
   ToolRoundLimitError,
   toolErrorPayload,
 } from './llmService';
+import {
+  appendRuntimeControl,
+  createToolLoopState,
+  finalAnswerControlInstruction,
+  recordToolRound,
+  type LlmRequestControl,
+  type ToolLoopState,
+} from './toolLoopGuard';
 import { materializeToolResultContent } from './contextManager';
 import { buildBrowserAssistantSystemPromptParts } from '../slashSkills';
 import { formatSomScreenshotContext } from '../somElementsSchema';
@@ -166,13 +174,24 @@ export class AnthropicClaudeService extends LlmService {
     _site: string,
     _ever: string,
     history: ClaudeHistoryMsg[],
+    requestControl: LlmRequestControl = {},
   ): Promise<RequestInit> {
     const { systemContent, basePrompt, skillSection } =
       await buildBrowserAssistantSystemPromptParts(BROWSER_ASSISTANT_SYSTEM_PROMPT);
-    const openaiTools = [...(await this.mcpClient.getLlmTools())];
+    const controlledSystemContent = appendRuntimeControl(
+      systemContent,
+      requestControl,
+    );
+    const openaiTools = requestControl.disableTools
+      ? []
+      : [...(await this.mcpClient.getLlmTools())];
     const tools = openaiToolsToClaude(openaiTools);
     armTurnUsageFixed(conversationId, {
-      system: estimateTextTokens(basePrompt),
+      system: estimateTextTokens(
+        requestControl.controlInstruction
+          ? `${basePrompt}\n${requestControl.controlInstruction}`
+          : basePrompt,
+      ),
       skills: estimateTextTokens(skillSection),
       tools: estimateJsonTokens(tools),
       summarized: estimateSummarizedInHistory(history as ConversationMessage[]),
@@ -182,8 +201,8 @@ export class AnthropicClaudeService extends LlmService {
       model: this.model,
       max_tokens: 4096,
       stream: true,
-      system: systemContent,
-      tools,
+      system: controlledSystemContent,
+      ...(requestControl.disableTools ? {} : { tools }),
       messages: toAnthropicMessages(history),
     };
 
@@ -213,16 +232,14 @@ export class AnthropicClaudeService extends LlmService {
     options: LlmSendMessageOptions,
     msgIds: string[],
     signal: AbortSignal,
-    toolRoundDepth = 0,
+    toolLoopState: ToolLoopState = createToolLoopState(),
     emptyResponseRecoveries = 0,
-  ): Promise<void> {
+    requestControl: LlmRequestControl = {},
+  ): Promise<LlmCallOutcome> {
     console.log(`Calling ${this.getName()} llm with model ${this.model}`);
     const msgId = `msg-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const claudeHistory = history as ClaudeHistoryMsg[];
     try {
-      if (toolRoundDepth > MAX_TOOL_ROUNDS_PER_TURN) {
-        throw new ToolRoundLimitError();
-      }
       msgIds.push(msgId);
       options.onMessageStart(_conversationId, msgId);
       let assistantText = '';
@@ -247,6 +264,7 @@ export class AnthropicClaudeService extends LlmService {
           site,
           ever,
           claudeHistory,
+          requestControl,
         ),
         msgId,
         signal,
@@ -260,6 +278,9 @@ export class AnthropicClaudeService extends LlmService {
           options.onTextMessage(_conversationId, sseEvent.msgId!, sseEvent.content);
         }
         if (sseEvent.type === 'tool_call') {
+          if (requestControl.disableTools) {
+            throw new ToolRoundLimitError();
+          }
           if (assistantText.trim()) {
             contentBlocks.push({ type: 'text', text: assistantText });
           }
@@ -365,8 +386,41 @@ export class AnthropicClaudeService extends LlmService {
             _conversationId,
             llmToolCallResults,
           );
-          if (halt) return;
-          await this.call(
+          if (halt) return 'done';
+          const decision = recordToolRound(
+            toolLoopState,
+            sseEvent.toolCalls || [],
+            llmToolCallResults,
+          );
+          if (decision.kind === 'finalize') {
+            console.warn('[Anthropic] Finalizing tool loop', {
+              conversationId: _conversationId,
+              reason: decision.reason,
+              roundsCompleted: toolLoopState.roundsCompleted,
+              totalToolCalls: toolLoopState.totalToolCalls,
+            });
+            return await this.call(
+              _conversationId,
+              userId,
+              deviceId,
+              site,
+              ever,
+              claudeHistory,
+              options,
+              msgIds,
+              signal,
+              toolLoopState,
+              emptyResponseRecoveries,
+              {
+                disableTools: true,
+                controlInstruction: finalAnswerControlInstruction(
+                  toolLoopState,
+                  decision.reason,
+                ),
+              },
+            );
+          }
+          return await this.call(
             _conversationId,
             userId,
             deviceId,
@@ -376,10 +430,12 @@ export class AnthropicClaudeService extends LlmService {
             options,
             msgIds,
             signal,
-            toolRoundDepth + 1,
+            toolLoopState,
             emptyResponseRecoveries,
+            decision.controlInstruction
+              ? { controlInstruction: decision.controlInstruction }
+              : {},
           );
-          return;
         }
       }
 
@@ -401,7 +457,7 @@ export class AnthropicClaudeService extends LlmService {
           };
           claudeHistory.push(recoveryMessage);
           try {
-            await this.call(
+            return await this.call(
               _conversationId,
               userId,
               deviceId,
@@ -411,25 +467,27 @@ export class AnthropicClaudeService extends LlmService {
               options,
               msgIds,
               signal,
-              toolRoundDepth,
+              toolLoopState,
               emptyResponseRecoveries + 1,
+              requestControl,
             );
           } finally {
             const recoveryIndex = claudeHistory.indexOf(recoveryMessage);
             if (recoveryIndex >= 0) claudeHistory.splice(recoveryIndex, 1);
           }
-          return;
         }
         throw new EmptyAssistantResponseError();
       }
       options.onMessageDone(_conversationId, msgId);
+      return 'done';
     } catch (e) {
       if ((e as { name?: string })?.name === 'AbortError' || signal?.aborted) {
         console.log(`[${this.getName()}] Request aborted`);
-        return;
+        return 'aborted';
       }
       console.error(`[${this.getName()}] API call failed:`, e);
       await options.onMessageError(_conversationId, msgId, e as Error);
+      return 'error';
     }
   }
 

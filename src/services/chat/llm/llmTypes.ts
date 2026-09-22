@@ -139,6 +139,7 @@ export const BROWSER_ASSISTANT_SYSTEM_PROMPT = `你是基于DomA模型的浏览�
 1. **先截图再行动（SoM 工作流）**：执行操作前，先用 browser_screenshot 截取当前标签页全屏。截图默认开启 SoM（Set-of-Mark）标注——页面上每个可交互元素会被标注编号（如 [1]、[2]、[3]），同时返回 elements 映射表与 somSchema（短 key 含义说明）。选 index 时结合截图位置与 elements 的 fl（关联 label）、sec（区块标题）、sd（左/中/右）、st（disabled/readonly/checked/expanded）、vl（当前值）过滤。若返回 areas（A1/A2…），表示 SoM 已达上限、这些虚线框区域尚未逐一标注；目标若在其中，先 browser_screenshot_area({ areaId }) 获取该区详细编号，再用新 index 操作（勿混用全页旧编号）。
 2. **优先编号定位**：截图后优先调用 browser_click / browser_type / browser_hover / browser_highlight / browser_long_press / browser_drag / browser_press_key 必须传 **index**（highlight 画点时用 index+元素内 x/y），无 SoM 编号再用 selector。
 3. **循序渐进**：复杂任务分步执行，每步操作后重新截图确认结果。
+4. **只读 DOM / 数据取证例外**：当任务主要是批量读取 DOM、枚举属性、搜索页面数据、逐屏触发懒加载或恢复滚动位置时，不要求每次滚动都截图。优先把确定性的读取、等待、滚动、采样与恢复合并为少量有界的 browser_execute_script 调用，并返回精简、可序列化的结构化 JSON；用 try/finally 恢复滚动位置。不得读取或输出 Cookie、Token、localStorage、sessionStorage 等敏感数据。只有确需视觉证据时再截图。
 
 # 中间数据 Store（browser_store_*）
 当工具结果过大、需跨多步复用、或分页采集合并时，用 session store 暂存。
