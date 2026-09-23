@@ -50,6 +50,10 @@ export default {
       },
       historyPanel: {
         searchPlaceholder: "Search history conversations",
+        deleteAll: "Delete all",
+        deleteAllConfirm: "Permanently delete all {count} history conversations and their messages? This cannot be undone.",
+        deleteAllWhileRunning: "Wait for active conversations to finish before deleting all history.",
+        deleteAllFailed: "Failed to delete all history conversations.",
         empty: "No history conversations yet",
         today: "Today",
         yesterday: "Yesterday",
@@ -523,6 +527,10 @@ export default {
       },
       historyPanel: {
         searchPlaceholder: "搜索历史会话",
+        deleteAll: "全部删除",
+        deleteAllConfirm: "确定永久删除全部 {count} 条历史会话及其消息吗？此操作不可撤销。",
+        deleteAllWhileRunning: "请先结束正在运行的会话，再删除全部历史会话。",
+        deleteAllFailed: "删除全部历史会话失败。",
         empty: "暂无历史会话",
         today: "今天",
         yesterday: "昨天",

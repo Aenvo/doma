@@ -145,18 +145,26 @@
         <div v-if="showHistory" key="history" class="chat-header-panel-mount">
           <div class="chat-header-panel-inner">
       <div class="history-panel">
-        <div class="history-search">
-          <span class="history-search-icon" aria-hidden="true">
-            <svg focusable="false" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
-              <path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z" />
-            </svg>
-          </span>
-          <input
-            v-model="historySearchQuery"
-            type="search"
-            class="history-search-input"
-            :placeholder="t('chat.historyPanel.searchPlaceholder')"
-          />
+        <div class="history-toolbar">
+          <div class="history-search">
+            <span class="history-search-icon" aria-hidden="true">
+              <svg focusable="false" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+                <path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z" />
+              </svg>
+            </span>
+            <input
+              v-model="historySearchQuery"
+              type="search"
+              class="history-search-input"
+              :placeholder="t('chat.historyPanel.searchPlaceholder')"
+            />
+          </div>
+          <button
+            type="button"
+            class="history-delete-all-btn"
+            :disabled="historyDeleteBusy || (!historySearchQuery.trim() && groupedHistoryConversations.length === 0)"
+            @click="deleteAllHistoryConversations"
+          >{{ t('chat.historyPanel.deleteAll') }}</button>
         </div>
 
         <div class="history-scroll" v-if="groupedHistoryConversations.length > 0">
@@ -2902,6 +2910,7 @@ let sidePanelRuntimeOnMessageListener: ((message: any, sender: any, sendResponse
 const showHistory = ref(false);
 const conversations = ref<StoredConversation[]>([]);
 const historySearchQuery = ref("");
+const historyDeleteBusy = ref(false);
 
 // 定时消息
 const showScheduled = ref(false);
@@ -5579,6 +5588,48 @@ async function deleteConversation(convId: string) {
   }
 }
 
+async function deleteAllHistoryConversations() {
+  if (historyDeleteBusy.value) return;
+  try {
+    const all = await chatStorage.getAllConversations();
+    const targets = all.filter((conv) => getConversationContext(conv.id)?.scheduled !== true);
+    if (!targets.length) return;
+    if (targets.some((conv) => isConversationLoading(conv.id))) {
+      window.alert(t("chat.historyPanel.deleteAllWhileRunning"));
+      return;
+    }
+    if (!window.confirm(t("chat.historyPanel.deleteAllConfirm", { count: targets.length }))) return;
+
+    historyDeleteBusy.value = true;
+    await flushAllMessagePersists();
+
+    for (const conv of targets) {
+      await chatStorage.deleteConversation(conv.id);
+      resetContextUsage(conv.id);
+      llmManager.clearConversation(conv.id);
+      removeConversationContext(conv.id);
+      if (conversationId.value === conv.id) {
+        messages.value = [];
+        conversationId.value = undefined;
+        activeStreamMsgId.value = null;
+      }
+    }
+  } catch (e) {
+    console.error("[Chat] Failed to delete all history conversations:", e);
+    window.alert(t("chat.historyPanel.deleteAllFailed"));
+  } finally {
+    if (historyDeleteBusy.value) {
+      try {
+        await refreshConversationContextList();
+        historySearchQuery.value = "";
+        await refreshHistoryConversations("");
+      } finally {
+        historyDeleteBusy.value = false;
+      }
+    }
+  }
+}
+
 function onProviderChange() {
   const config = llmManager.getConfig();
   currentApiKey.value = config.apiKeys[selectedProvider.value] || '';
@@ -7487,10 +7538,40 @@ defineExpose({
     background: var(--stay-background);
     border-radius: 12px;
 
+    .history-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 0 4px;
+    }
+
     .history-search {
       position: relative;
-      margin: 0 4px;
+      flex: 1 1 auto;
+      min-width: 0;
       box-sizing: border-box;
+    }
+
+    .history-delete-all-btn {
+      flex: 0 0 auto;
+      height: 36px;
+      padding: 0 12px;
+      border: 1px solid color-mix(in srgb, var(--stay-error, #e74c3c) 55%, var(--stay-border));
+      border-radius: 12px;
+      background: color-mix(in srgb, var(--stay-error, #e74c3c) 10%, var(--stay-backgroundSecondary));
+      color: var(--stay-error);
+      font-size: 12px;
+      cursor: pointer;
+
+      &:hover:not(:disabled) {
+        border-color: color-mix(in srgb, var(--stay-error, #e74c3c) 75%, var(--stay-border));
+        background: color-mix(in srgb, var(--stay-error, #e74c3c) 18%, var(--stay-backgroundSecondary));
+      }
+
+      &:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
     }
 
     .history-search-icon {
