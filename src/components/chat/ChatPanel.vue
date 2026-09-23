@@ -904,6 +904,7 @@ import {
   sendMcpBridgeAccepted,
   sendMcpBridgeResult,
   sendMcpBridgeRunning,
+  setMcpBridgePanelContext,
   startMcpBridgeClient,
   stopMcpBridgeClient,
   type McpBridgeInboundMessage,
@@ -1103,6 +1104,10 @@ import {
 
 /** Safari 页内壳：禁 tabs/windows；宿主 tab 由 edition(pro) + panelShell 注入 */
 const IS_SAFARI_EXT = isSafariSidePanelShell();
+const panelHostTabId = (() => {
+  const value = Number(new URLSearchParams(window.location.search).get("domaTabId"));
+  return Number.isInteger(value) && value > 0 ? value : undefined;
+})();
 
 if (IS_SAFARI_EXT) {
   initActiveBrowserTabTracking((tab) => {
@@ -1155,6 +1160,8 @@ const mcpExternalTaskQueue: Array<{
   sendText: string;
   callerAgent: string;
   attachments: unknown[];
+  targetTabId?: number;
+  targetUrl?: string;
 }> = [];
 let chatPanelReadyForMcp = false;
 
@@ -1256,6 +1263,8 @@ async function processMcpExternalTask(payload: {
   sendText: string;
   callerAgent: string;
   attachments?: unknown[];
+  targetTabId?: number;
+  targetUrl?: string;
 }): Promise<void> {
   const { requestId, callerAgent } = payload;
   // 块内仅 Agent 名；instruction 必须在 interactionBlock 外
@@ -1289,7 +1298,16 @@ async function processMcpExternalTask(payload: {
   }
 
   try {
-    await startGroupSession();
+    if (payload.targetTabId != null && payload.targetTabId !== panelHostTabId) {
+      throw new Error("MCP 指定网页与当前 DomA 侧栏不匹配，请在目标网页重新打开侧栏");
+    }
+    if (payload.targetTabId != null && payload.targetUrl) {
+      const current = await getContext().browser.tabs.get(payload.targetTabId);
+      if (current.url !== payload.targetUrl) {
+        throw new Error("目标网页已跳转，请重新发起任务并确认网页");
+      }
+    }
+    await startGroupSession(payload.targetTabId);
     // conversationId 由 startGroupSession 生成；MCP 返回的必须是这个 id
     const cid = conversationId.value;
     if (!cid) {
@@ -1335,6 +1353,8 @@ function handleMcpExternalTaskMessage(message: {
   sendText?: unknown;
   callerAgent?: unknown;
   attachments?: unknown;
+  targetTabId?: unknown;
+  targetUrl?: unknown;
 }): { ok: boolean; error?: string; queued?: boolean } {
   const requestId = typeof message.requestId === "string" ? message.requestId.trim() : "";
   const rawSend = typeof message.sendText === "string" ? message.sendText.trim() : "";
@@ -1347,7 +1367,11 @@ function handleMcpExternalTaskMessage(message: {
 
   const sendText = normalizeMcpExternalSendText(rawSend, callerAgent);
   const attachments = Array.isArray(message.attachments) ? message.attachments : [];
-  const item = { requestId, sendText, callerAgent, attachments };
+  const targetTabId = typeof message.targetTabId === "number" && Number.isInteger(message.targetTabId)
+    ? message.targetTabId
+    : undefined;
+  const targetUrl = typeof message.targetUrl === "string" ? message.targetUrl : undefined;
+  const item = { requestId, sendText, callerAgent, attachments, targetTabId, targetUrl };
 
   if (!chatPanelReadyForMcp) {
     mcpExternalTaskQueue.push(item);
@@ -2344,6 +2368,8 @@ function onMcpBridgeInbound(msg: McpBridgeInboundMessage) {
     sendText: msg.sendText,
     callerAgent: msg.callerAgent,
     attachments: msg.attachments,
+    targetTabId: msg.targetTabId,
+    targetUrl: msg.targetUrl,
   });
 }
 
@@ -4511,6 +4537,18 @@ onMounted(async () => {
   });
   await loadConfig();
   console.log("[ChatPanel] loadConfig done");
+  if (panelHostTabId != null) {
+    try {
+      const hostTab = await getContext().browser.tabs.get(panelHostTabId);
+      setMcpBridgePanelContext({
+        tabId: panelHostTabId,
+        title: hostTab.title,
+        url: hostTab.url,
+      });
+    } catch (error) {
+      console.warn("[ChatPanel] panel host tab is gone", panelHostTabId, error);
+    }
+  }
   await ensureChatPanelWindowId();
   addListener();
   if (!IS_SAFARI_EXT) {
@@ -4895,6 +4933,13 @@ function addListener() {
   }
   sidePanelRuntimeOnMessageListener = (message, sender, sendResponse) => {
     if (
+      (message?.operate === "chat/scheduledPing" || message?.operate === "chat/scheduledFire")
+      && typeof message?.targetPanelTabId === "number"
+      && message.targetPanelTabId !== panelHostTabId
+    ) {
+      return undefined;
+    }
+    if (
       message?.origin === "background"
       && (message?.operate === "chat/getTabIdByConversationId"
         || message?.operate === "chat/planQuestionsShow"
@@ -4923,6 +4968,7 @@ function addTabListeners() {
   if (!handleTabActivated) {
     handleTabActivated = async (activeInfo) => {
       console.log("[ChatPanel] tabs.onActivated", { activeInfo });
+      if (panelHostTabId != null && activeInfo.tabId !== panelHostTabId) return;
       if (!(await isChatPanelWindow(activeInfo.windowId))) return;
 
       // 截图 brief-activate 等临时切 tab：禁止抢绑面板
@@ -4978,6 +5024,9 @@ function addTabListeners() {
   if (!handleTabUpdated) {
     handleTabUpdated = async (tabId, changeInfo, tab) => {
       console.log("[ChatPanel] tabs.onUpdated", { tabId, changeInfo, tab });
+      if (panelHostTabId != null && tabId === panelHostTabId && (changeInfo.title || changeInfo.url)) {
+        setMcpBridgePanelContext({ tabId: panelHostTabId, title: tab.title, url: tab.url });
+      }
       if (changeInfo.status === "complete") {
         const conversationId = await getConversationIdByTabId(tabId);
         if (!conversationId) return;
@@ -5497,27 +5546,29 @@ function formatDomATabGroupTitle(raw: string): string {
   return `${DOMA_TAB_GROUP_TITLE_PREFIX}${title}`;
 }
 
-async function startGroupSession() {
+async function startGroupSession(sourceTabId?: number) {
   try {
     const browser = getContext().browser;
-    const w = await getContext().browser.windows.getLastFocused({ populate: true });
-    const currentTab = w.tabs?.find((t:any) => t.active);
-    // 在同窗口新开一个空白页作为组会话的起点 tab
-    const newTab = await new Promise<any>((resolve, reject) => {
+    // MCP tasks start on the explicitly selected page. Manual/scheduled tasks retain their own new-tab flow.
+    let newTab: any;
+    if (sourceTabId != null) {
+      newTab = await browser.tabs.get(sourceTabId);
+    } else {
+      const w = await browser.windows.getLastFocused({ populate: true });
+      const currentTab = w.tabs?.find((t: any) => t.active);
       const createInfo: any = { active: true };
       if (typeof currentTab?.windowId === 'number') createInfo.windowId = currentTab.windowId;
-      browser.tabs.create(createInfo, (t: any) => {
-        if (browser.runtime.lastError) {
-          reject(new Error(browser.runtime.lastError.message));
-        } else {
-          resolve(t);
-        }
+      newTab = await new Promise<any>((resolve, reject) => {
+        browser.tabs.create(createInfo, (tab: any) => {
+          if (browser.runtime.lastError) reject(new Error(browser.runtime.lastError.message));
+          else resolve(tab);
+        });
       });
-    });
+    }
     const newTabId = typeof newTab?.id === 'number' ? newTab.id : undefined;
     if (newTabId == null) return;
 
-    // 把新空白 tab 放进一个新 group
+    // Create the task group around the selected page (or the manual new tab).
     const groupId = await new Promise<number>((resolve, reject) => {
       browser.tabs.group({ tabIds: [newTabId] }, (gid: number) => {
         if (browser.runtime.lastError) {

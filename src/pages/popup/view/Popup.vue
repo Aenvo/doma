@@ -36,13 +36,16 @@ import SettingSvg from '@/assets/images/menu/setting.svg'
 import { isSupportSidePannel } from '@/utils/feature'
 import { isProEdition } from '@/config/buildEdition'
 import { demoFindAndDownloadCurrentTabVideos } from '@/edition/popupVideoDemo'
+import { openTabSidePanel } from '@/edition/chromeSidePanel'
 
 
 const handleClickToolAction = (tab: string) => {
   if("sidepannel" === tab){
     getContext().browser.windows.getCurrent({populate: true},(_win:any)=>{
-      console.log('_win----',_win)
-      getContext().browser.sidePanel.open({ windowId: _win.id });
+      const activeTab = _win?.tabs?.find((item: { active?: boolean }) => item.active);
+      if (typeof activeTab?.id === 'number') {
+        void openTabSidePanel(activeTab.id);
+      }
       window.close();
     })
   }else{

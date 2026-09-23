@@ -6,6 +6,7 @@
  * - CLI 开关 → :3857
  * 回包按 requestId / conversationId 路由到来源 socket。
  */
+import mcpRelease from "../../../mcp-bridge/doma_mcp_release.json";
 
 /** MCP bridge WebSocket (paired with control :3846). */
 export const DOMA_MCP_BRIDGE_PORT = 3847;
@@ -31,6 +32,8 @@ export type McpBridgeTaskMessage = {
   type: "task";
   requestId: string;
   sendText: string;
+  targetTabId?: number;
+  targetUrl?: string;
   callerAgent?: string;
   attachments?: unknown[];
 };
@@ -59,7 +62,7 @@ export type McpBridgeInboundMessage =
   | McpBridgeCloseMessage;
 
 export type McpBridgeOutboundMessage =
-  | { type: "hello"; role: "extension"; version?: string }
+  | { type: "hello"; role: "extension"; version?: string; tabId?: number; title?: string; url?: string }
   | { type: "accepted"; requestId: string; conversationId: string }
   | { type: "running"; conversationId: string; text?: string }
   | {
@@ -85,6 +88,7 @@ type BridgeSlot = {
 const KEEPALIVE_INTERVAL_MS = 20_000;
 
 let taskHandler: InboundHandler | null = null;
+let panelContext: { tabId?: number; title?: string; url?: string } = {};
 let stopped = false;
 /** Ports currently allowed to connect / reconnect (empty = none). */
 let enabledPorts = new Set<number>();
@@ -92,6 +96,15 @@ let enabledPorts = new Set<number>();
 /** requestId / conversationId → originating port (for reply routing). */
 const requestPort = new Map<string, number>();
 const conversationPort = new Map<string, number>();
+
+export function setMcpBridgePanelContext(context: { tabId?: number; title?: string; url?: string }): void {
+  panelContext = context;
+  slots.forEach((slot) => {
+    if (slot.socket?.readyState === WebSocket.OPEN) {
+      sendOn(slot.socket, { type: "hello", role: "extension", version: mcpRelease.version, ...panelContext });
+    }
+  });
+}
 
 const slots = new Map<number, BridgeSlot>(
   DOMA_BRIDGE_WS_PORTS.map((port) => [
@@ -436,7 +449,8 @@ function tryPort(port: number, generation: number): Promise<WebSocket | null> {
           JSON.stringify({
             type: "hello",
             role: "extension",
-            version: "0.6.0",
+            version: mcpRelease.version,
+            ...panelContext,
           }),
         );
       } catch {

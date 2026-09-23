@@ -392,6 +392,9 @@ async function scriptingToListeningTimedtext(tabId: number) {
 
 export {
   configureGlobalSidePanel,
+  configureTabSidePanel,
+  configureExistingTabSidePanels,
+  configureTabScopedSidePanelAction,
   registerNativeSidePanelListeners,
   handleBrowserActionClicked,
   tryEnsureEditionSidePanel,

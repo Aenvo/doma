@@ -33,7 +33,8 @@ from xml.sax.saxutils import escape as xml_escape
 
 from bridge_auth import load_or_create_token
 
-SERVER_VERSION = "0.6.2"
+SERVER_VERSION = "0.7.3"
+BRIDGE_PROTOCOL_VERSION = 1
 CONTROL_PORT = int(os.environ.get("DOMA_CONTROL_PORT", "3846"))
 BRIDGE_PORT = int(os.environ.get("DOMA_BRIDGE_PORT", "3847"))
 BIND_TIMEOUT_SEC = float(os.environ.get("DOMA_BIND_TIMEOUT_SEC", "90"))
@@ -43,9 +44,14 @@ _TASKS: dict[str, dict[str, Any]] = {}
 _REQUESTS: dict[str, dict[str, Any]] = {}
 _REQUEST_TO_CONVERSATION: dict[str, str] = {}
 _TASKS_LOCK = threading.Lock()
+_STOP_REQUESTED = threading.Event()
 
 _CLIENTS: list[Any] = []
 _CLIENTS_LOCK = threading.Lock()
+_CLIENT_META: dict[Any, dict[str, Any]] = {}
+_REQUEST_CLIENTS: dict[str, Any] = {}
+_CONVERSATION_CLIENTS: dict[str, Any] = {}
+_CONVERSATION_TAB_IDS: dict[str, int] = {}
 
 # Desktop MCP stdio clients (Cursor / Claude / …) heartbeats
 _AGENTS: dict[str, dict[str, Any]] = {}
@@ -170,7 +176,18 @@ def _update_task(conversation_id: str, **fields: Any) -> None:
         if not rec:
             return
         rec.update(fields)
-        rec["updatedAt"] = time.time()
+        now = time.time()
+        rec["updatedAt"] = now
+        if rec.get("status") in ("done", "error"):
+            request_id = rec.get("requestId")
+            req = _REQUESTS.get(request_id) if isinstance(request_id, str) else None
+            if req and req.get("status") in ("pending", "running"):
+                req.update(
+                    status=rec["status"],
+                    ok=rec.get("ok") is True,
+                    text=rec.get("text") or "",
+                    updatedAt=now,
+                )
 
 
 def _extension_connected() -> bool:
@@ -178,25 +195,66 @@ def _extension_connected() -> bool:
         return len(_CLIENTS) > 0
 
 
-def _broadcast_task(payload: dict[str, Any]) -> int:
+def _send_task(client: Any, payload: dict[str, Any]) -> bool:
     raw = json.dumps(payload, ensure_ascii=False)
-    dead: list[Any] = []
-    sent = 0
+    try:
+        client.send_text(raw)
+        return True
+    except Exception as e:
+        print(f"[daemon] send failed: {e}", file=sys.stderr)
+        with _CLIENTS_LOCK:
+            if client in _CLIENTS:
+                _CLIENTS.remove(client)
+            _CLIENT_META.pop(client, None)
+        return False
+
+
+def _select_task_client(target_tab_id: int | None) -> tuple[Any | None, dict[str, Any]]:
     with _CLIENTS_LOCK:
         clients = list(_CLIENTS)
-    for client in clients:
-        try:
-            client.send_text(raw)
-            sent += 1
-        except Exception as e:
-            print(f"[daemon] send failed: {e}", file=sys.stderr)
-            dead.append(client)
-    if dead:
-        with _CLIENTS_LOCK:
-            for c in dead:
-                if c in _CLIENTS:
-                    _CLIENTS.remove(c)
-    return sent
+        panels: dict[int, tuple[Any, dict[str, Any]]] = {}
+        for client in clients:
+            meta = _CLIENT_META.get(client) or {}
+            tab_id = meta.get("tabId")
+            if isinstance(tab_id, int) and tab_id > 0:
+                panels[tab_id] = (client, meta)
+    candidates = [
+        {"tabId": tab_id, "title": meta.get("title") or "", "url": meta.get("url") or ""}
+        for tab_id, (_, meta) in sorted(panels.items())
+    ]
+    if target_tab_id is not None:
+        selected = panels.get(target_tab_id)
+        if selected:
+            return selected[0], {"tabId": target_tab_id, "url": selected[1].get("url") or ""}
+        return None, _payload(False, "指定网页的 DomA 侧栏未连接，请在该网页重新打开侧栏", status="error", candidates=candidates)
+    if len(panels) == 1:
+        tab_id, (client, meta) = next(iter(panels.items()))
+        return client, {"tabId": tab_id, "url": meta.get("url") or ""}
+    if len(panels) > 1:
+        return None, _payload(
+            False,
+            "多个网页打开了 DomA 侧栏。请向用户确认目标网页，再以该网页的 targetTabId 重新调用本工具。",
+            status="ambiguous",
+            candidates=candidates,
+        )
+    if len(clients) == 1 and clients[0] in _CLIENT_META:
+        # Older extension and Safari overlay do not identify a host tab.
+        return clients[0], {}
+    return None, _payload(False, "没有可确定目标的 DomA 侧栏，请在目标网页打开 DomA（新侧栏刚打开时可稍后重试）", status="error")
+
+
+def _conversation_client(conversation_id: str) -> Any | None:
+    with _CLIENTS_LOCK:
+        client = _CONVERSATION_CLIENTS.get(conversation_id)
+        if client in _CLIENTS:
+            return client
+        tab_id = _CONVERSATION_TAB_IDS.get(conversation_id)
+        if tab_id is not None:
+            for candidate in reversed(_CLIENTS):
+                if (_CLIENT_META.get(candidate) or {}).get("tabId") == tab_id:
+                    _CONVERSATION_CLIENTS[conversation_id] = candidate
+                    return candidate
+    return None
 
 
 def _bind_conversation(request_id: str, conversation_id: str) -> None:
@@ -286,6 +344,7 @@ def dispatch_to_doma(
     *,
     msg_type: str = "task",
     conversation_id: str | None = None,
+    target_tab_id: int | None = None,
 ) -> dict[str, Any]:
     if not _extension_connected():
         return {
@@ -298,6 +357,16 @@ def dispatch_to_doma(
             "bridgeConnected": False,
             "attachmentCount": len(attachments),
         }
+
+    if msg_type == "task":
+        client, target = _select_task_client(target_tab_id)
+        if client is None:
+            return target
+    else:
+        client = _conversation_client(conversation_id or "")
+        if client is None:
+            return _payload(False, "原会话的 DomA 侧栏已断开，请重新打开该网页的侧栏", status="error", bridgeConnected=False)
+        target = {}
 
     payload: dict[str, Any] = {
         "type": msg_type,
@@ -316,16 +385,22 @@ def dispatch_to_doma(
     }
     if conversation_id:
         payload["conversationId"] = conversation_id
+    if "tabId" in target:
+        payload["targetTabId"] = target["tabId"]
+        payload["targetUrl"] = target["url"]
 
-    n = _broadcast_task(payload)
-    if n <= 0:
+    if msg_type == "task":
+        with _CLIENTS_LOCK:
+            _REQUEST_CLIENTS[request_id] = client
+    if not _send_task(client, payload):
+        with _CLIENTS_LOCK:
+            _REQUEST_CLIENTS.pop(request_id, None)
         return {
             "ok": False,
             "text": "扩展曾连接但发送失败，请重试",
             "status": "error",
             "bridgeConnected": False,
         }
-
     return {
         "ok": True,
         "text": (
@@ -335,7 +410,7 @@ def dispatch_to_doma(
         ),
         "status": "pending",
         "bridgeConnected": True,
-        "clients": n,
+        "clients": 1,
         "attachmentCount": len(attachments),
     }
 
@@ -362,8 +437,10 @@ def dispatch_close_to_doma(
         "conversationId": conversation_id,
         "callerAgent": caller_agent,
     }
-    n = _broadcast_task(payload)
-    if n <= 0:
+    client = _conversation_client(conversation_id)
+    if client is None:
+        return _payload(False, "原会话的 DomA 侧栏已断开，请重新打开该网页的侧栏", status="error", bridgeConnected=False)
+    if not _send_task(client, payload):
         return {
             "ok": False,
             "text": "扩展曾连接但发送失败，请重试",
@@ -376,7 +453,7 @@ def dispatch_close_to_doma(
         "text": "已提交关闭会话到 DomA，等待扩展确认…",
         "status": "pending",
         "bridgeConnected": True,
-        "clients": n,
+        "clients": 1,
     }
 
 
@@ -384,9 +461,12 @@ def start_group_conversation(
     task: Any,
     attachments: Any = None,
     caller_agent: Any = None,
+    target_tab_id: Any = None,
 ) -> dict[str, Any]:
     if not isinstance(task, str) or not task.strip():
         return _payload(False, "task 不能为空", status="error")
+    if target_tab_id is not None and (type(target_tab_id) is not int or target_tab_id <= 0):
+        return _payload(False, "targetTabId 必须是正整数", status="error")
 
     normalized: list[dict[str, Any]] = []
     if attachments is not None:
@@ -419,15 +499,16 @@ def start_group_conversation(
         }
 
     try:
-        out = dispatch_to_doma(request_id, send_text, normalized, caller)
+        out = dispatch_to_doma(request_id, send_text, normalized, caller, target_tab_id=target_tab_id)
         if not out.get("ok"):
             _fail_request(request_id, str(out.get("text") or "提交失败"))
             return _payload(
                 False,
                 str(out.get("text") or "提交失败"),
-                status="error",
+                status=out.get("status") or "error",
                 callerAgent=caller,
                 bridgeConnected=bool(out.get("bridgeConnected")),
+                **({"candidates": out["candidates"]} if "candidates" in out else {}),
             )
 
         if not event.wait(BIND_TIMEOUT_SEC):
@@ -849,6 +930,16 @@ class BridgeWSHandler(BaseHTTPRequestHandler):
                     continue
                 typ = data.get("type")
                 if typ == "hello":
+                    tab_id = data.get("tabId")
+                    meta: dict[str, Any] = {}
+                    if type(tab_id) is int and tab_id > 0:
+                        meta = {
+                            "tabId": tab_id,
+                            "title": str(data.get("title") or "")[:200],
+                            "url": str(data.get("url") or "")[:2048],
+                        }
+                    with _CLIENTS_LOCK:
+                        _CLIENT_META[self] = meta
                     print("[daemon] hello from extension", file=sys.stderr)
                 elif typ == "keepalive":
                     # Sidepanel keepalive ping; no state change.
@@ -857,6 +948,15 @@ class BridgeWSHandler(BaseHTTPRequestHandler):
                     rid = data.get("requestId")
                     cid = data.get("conversationId")
                     if isinstance(rid, str) and isinstance(cid, str):
+                        with _CLIENTS_LOCK:
+                            correct_client = _REQUEST_CLIENTS.get(rid) is self
+                            if correct_client:
+                                _CONVERSATION_CLIENTS[cid] = self
+                                tab_id = (_CLIENT_META.get(self) or {}).get("tabId")
+                                if type(tab_id) is int:
+                                    _CONVERSATION_TAB_IDS[cid] = tab_id
+                        if not correct_client:
+                            continue
                         _bind_conversation(rid, cid)
                         print(
                             f"[daemon] bound request={rid} conversationId={cid}",
@@ -870,6 +970,10 @@ class BridgeWSHandler(BaseHTTPRequestHandler):
             with _CLIENTS_LOCK:
                 if self in _CLIENTS:
                     _CLIENTS.remove(self)
+                _CLIENT_META.pop(self, None)
+                for rid, client in list(_REQUEST_CLIENTS.items()):
+                    if client is self:
+                        _REQUEST_CLIENTS.pop(rid, None)
             print("[daemon] extension disconnected", file=sys.stderr)
 
 
@@ -937,6 +1041,7 @@ class ControlHTTPHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "role": "doma-bridge-daemon",
                     "version": SERVER_VERSION,
+                    "bridgeProtocolVersion": BRIDGE_PROTOCOL_VERSION,
                     "authRequired": True,
                     "controlPort": CONTROL_PORT,
                     "bridgePort": BRIDGE_PORT,
@@ -981,6 +1086,18 @@ class ControlHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"ok": True, **snap})
             return
 
+        if path == "/v1/admin/stop":
+            with _TASKS_LOCK:
+                busy = any(rec.get("status") in ("pending", "running") for rec in _TASKS.values()) or any(
+                    req.get("status") in ("pending", "running") for req in _REQUESTS.values()
+                )
+            if busy:
+                self._send_json(409, {"ok": False, "text": "active conversations", "status": "busy"})
+                return
+            self._send_json(200, {"ok": True, "text": "stopping"})
+            _STOP_REQUESTED.set()
+            return
+
         if path == "/v1/conversations/start":
             # Also count this agent as active
             _touch_agent(
@@ -991,6 +1108,7 @@ class ControlHTTPHandler(BaseHTTPRequestHandler):
                 body.get("task"),
                 body.get("attachments"),
                 body.get("callerAgent"),
+                body.get("targetTabId"),
             )
             self._send_json(200, result)
             return
@@ -1042,6 +1160,8 @@ def main() -> None:
         control.server_close()
         sys.exit(1)
 
+    control.daemon_threads = True
+    bridge.daemon_threads = True
     threading.Thread(target=control.serve_forever, name="doma-control", daemon=True).start()
     threading.Thread(target=bridge.serve_forever, name="doma-bridge-ws", daemon=True).start()
     print(
@@ -1050,10 +1170,14 @@ def main() -> None:
         file=sys.stderr,
     )
     try:
-        while True:
-            time.sleep(3600)
+        _STOP_REQUESTED.wait()
     except KeyboardInterrupt:
         print("[daemon] shutting down", file=sys.stderr)
+    finally:
+        control.shutdown()
+        bridge.shutdown()
+        control.server_close()
+        bridge.server_close()
 
 
 if __name__ == "__main__":

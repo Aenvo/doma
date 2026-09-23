@@ -23,6 +23,9 @@ import {
   initEditionBackground,
   registerEditionTabListeners,
   configureGlobalSidePanel,
+  configureTabSidePanel,
+  configureExistingTabSidePanels,
+  configureTabScopedSidePanelAction,
   registerNativeSidePanelListeners,
   handleBrowserActionClicked,
 } from "@/edition/editionSwHooks";
@@ -44,7 +47,6 @@ import { getConversationContext, getConversationIdByTabId, removeConversationByG
 import { StayWebExtensionHandler } from "@/services/extension/StayWebExtensionHandler";
 
 class Background{
-    showSidePanel: boolean = false;
     fileLoaderHandler?: any;
     extensionHandler: StayWebExtensionHandler;
     transport = new ExtensionServerTransport();
@@ -55,13 +57,35 @@ class Background{
       console.log("Background constructor...");
       this.extensionHandler = new StayWebExtensionHandler();
       this.mcpServer = createMcpServer(this.transport);
-      (async () => {
-        this.showSidePanel = await Storage.init().get("doma_agent_side_pannel_status") || false;
-      })();
-      
+      // Register synchronously: action clicks can wake a suspended service worker.
+      const browser = getContext().browser;
+      browser.action.onClicked.addListener(handleBrowserActionClicked);
+      const configureTab = (tabId: number) => {
+        void configureTabSidePanel(tabId).catch((error: unknown) => {
+          console.warn("[sidePanel] failed to configure tab panel", tabId, error);
+        });
+      };
+      browser.tabs.onCreated.addListener((tab: { id?: number }) => {
+        if (typeof tab.id === "number") configureTab(tab.id);
+      });
+      browser.tabs.onActivated.addListener(({ tabId }: { tabId: number }) => configureTab(tabId));
+      void configureGlobalSidePanel(false)
+        .then(configureExistingTabSidePanels)
+        .then(configureTabScopedSidePanelAction)
+        .catch((error: unknown) => {
+          console.warn("[sidePanel] failed to initialize tab panels", error);
+        });
+      registerNativeSidePanelListeners({
+        onClosed: () => {
+          void Storage.init().set("doma_agent_side_pannel_status", false);
+        },
+        onOpened: () => {
+          void Storage.init().set("doma_agent_side_pannel_status", true);
+        },
+      });
     }
 
-    /** 窗口级侧栏：不按 tabId 绑定，避免每 tab 一份 ChatPanel 实例 */
+    /** Disable the manifest fallback; action clicks enable only the clicked tab. */
     private async setGlobalSidePanelEnabled(enabled: boolean): Promise<void> {
       await configureGlobalSidePanel(enabled);
     }
@@ -573,37 +597,15 @@ class Background{
       getContext().browser.runtime.onInstalled.addListener(async ({reason}: { reason: string }) => {
         console.log("onInstalled================", reason);
         if (reason === 'install') {
-          this.showSidePanel = false;
           await Storage.init().set("doma_agent_side_pannel_status", false);
         }
       });
 
       await initEditionBackground(swCtx);
 
-      await this.setGlobalSidePanelEnabled(true);
+      await this.setGlobalSidePanelEnabled(false);
 
       registerScheduledAlarmsListener();
-
-      getContext().browser.action.onClicked.addListener((tab: any) => {
-        console.log("panel----", this.showSidePanel);
-        handleBrowserActionClicked(tab, {
-          showSidePanel: this.showSidePanel,
-          setShowSidePanel: (open) => {
-            this.showSidePanel = open;
-          },
-        });
-      });
-
-      registerNativeSidePanelListeners({
-        onClosed: () => {
-          this.showSidePanel = false;
-          void Storage.init().set("doma_agent_side_pannel_status", false);
-        },
-        onOpened: () => {
-          this.showSidePanel = true;
-          void Storage.init().set("doma_agent_side_pannel_status", true);
-        },
-      });
 
       getContext().browser.webNavigation.onBeforeNavigate.addListener((detail: any)=>{
         if(detail){

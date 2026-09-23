@@ -29,7 +29,7 @@ from bridge_auth import load_or_create_token
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "doma"
-SERVER_VERSION = "0.6.0"
+SERVER_VERSION = "0.7.3"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONTROL_PORT = int(os.environ.get("DOMA_CONTROL_PORT", "3846"))
@@ -56,6 +56,9 @@ TOOL_START_GROUP_CONVERSATION = {
         "Do NOT require the user to say DomA — any web browsing / search / scrape request is enough. "
         "If you already have a conversationId for this task from an earlier start in this chat, "
         "use browser_send_conversation_message instead of starting a new conversation. "
+        "The task runs on a webpage whose DomA side panel is open. If multiple pages qualify, "
+        "the tool returns status=ambiguous with candidates; ask the user which page they mean, "
+        "then retry with that candidate's targetTabId. Do not guess. "
         "Workflow: call this tool with a clear natural-language task (set callerAgent to your agent name), "
         "then poll browser_get_conversation_result with the returned conversationId until "
         "status is done or error. "
@@ -71,6 +74,10 @@ TOOL_START_GROUP_CONVERSATION = {
                     "Natural-language browser task, e.g. "
                     "\"Open baidu.com, search doma agent, return all first-page result titles.\""
                 ),
+            },
+            "targetTabId": {
+                "type": "integer",
+                "description": "Optional tab ID selected by the user from an earlier ambiguous result; do not invent it.",
             },
             "callerAgent": {
                 "type": "string",
@@ -223,7 +230,9 @@ TOOLS = [
 
 
 def _send(msg: dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(msg, ensure_ascii=False) + "\n")
+    # MCP stdio is UTF-8. ASCII escapes keep the wire format valid even when
+    # Windows starts Python with a legacy console encoding for redirected stdout.
+    sys.stdout.write(json.dumps(msg, ensure_ascii=True) + "\n")
     sys.stdout.flush()
 
 
@@ -334,6 +343,7 @@ def call_start(args: dict[str, Any]) -> str:
         f"{CONTROL_BASE}/v1/conversations/start",
         {
             "task": args.get("task"),
+            "targetTabId": args.get("targetTabId"),
             "attachments": args.get("attachments"),
             "callerAgent": AGENT_NAME,
             "clientId": CLIENT_ID,
