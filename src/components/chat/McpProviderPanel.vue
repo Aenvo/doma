@@ -532,7 +532,7 @@ onUnmounted(() => {
   padding: 0;
   border: none;
   border-radius: 12px;
-  background: var(--stay-border, #d0d0d0);
+  background: var(--stay-switch-off, #2F3134);
   cursor: pointer;
   transition: background-color 0.2s ease;
 
@@ -542,7 +542,7 @@ onUnmounted(() => {
   }
 
   &.on {
-    background: var(--stay-primary);
+    background: var(--stay-switch-on, #22c55e);
   }
 }
 
