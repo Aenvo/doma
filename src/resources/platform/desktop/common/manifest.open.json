@@ -1,9 +1,9 @@
 {
     "name": "__MSG_extension_name__",
-    "version": "0.0.17",
+    "version": "0.0.18",
     "description": "__MSG_extension_description__",
     "manifest_version": 3,
-    "build": "274",
+    "build": "275",
     "copyright": "DomA Agent",
     "default_locale": "en",
     "icons": {
