@@ -29,7 +29,7 @@ from bridge_auth import load_or_create_token
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "doma"
-SERVER_VERSION = "0.7.3"
+SERVER_VERSION = "0.7.4"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONTROL_PORT = int(os.environ.get("DOMA_CONTROL_PORT", "3846"))
@@ -61,8 +61,9 @@ TOOL_START_GROUP_CONVERSATION = {
         "then retry with that candidate's targetTabId. Do not guess. "
         "Workflow: call this tool with a clear natural-language task (set callerAgent to your agent name), "
         "then poll browser_get_conversation_result with the returned conversationId until "
-        "status is done or error. "
-        "Returns JSON: { ok, text, conversationId, status, callerAgent, bridgeConnected }. "
+        "status is done, needs_user_input, or error. Ask the user when input is needed, "
+        "then continue with browser_send_conversation_message using the same conversationId. "
+        "Returns JSON including ok, text, conversationId, requestId, status, targetTitle, targetUrl, sources, artifacts. "
         "Safe for multiple desktop agents: all share one local DomA bridge daemon."
     ),
     "inputSchema": {
@@ -119,8 +120,8 @@ TOOL_SEND_CONVERSATION_MESSAGE = {
         "send more instructions / attach more files / ask DomA to recognize an image after a prior task). "
         "Do NOT start a new conversation for follow-ups. "
         "Requires conversationId + text; optional attachments (base64). "
-        "After calling, poll browser_get_conversation_result with the SAME conversationId until done/error. "
-        "Returns JSON: { ok, text, conversationId, status, callerAgent, bridgeConnected }."
+        "After calling, poll browser_get_conversation_result with the SAME conversationId until done, needs_user_input, or error. "
+        "Returns JSON including ok, text, conversationId, requestId, status, sources, artifacts."
     ),
     "inputSchema": {
         "type": "object",
@@ -175,9 +176,10 @@ TOOL_GET_CONVERSATION_RESULT = {
         "Poll status/result of a DomA real-browser task started by browser_start_group_conversation "
         "or continued by browser_send_conversation_message. "
         "Required after every start or send: call repeatedly with the SAME conversationId until "
-        "status is done or error, then return the final text to the user. "
-        "Returns JSON: { ok, text, conversationId, status, callerAgent, bridgeConnected } "
-        "(status: pending|running|done|error)."
+        "status is done, needs_user_input, or error. Return the full final text and usable "
+        "sources/artifacts to the user; for needs_user_input ask the user and continue the same conversation. "
+        "Returns JSON including ok, text, conversationId, requestId, targetTitle, targetUrl, "
+        "sources, artifacts, status (pending|running|done|needs_user_input|error)."
     ),
     "inputSchema": {
         "type": "object",
@@ -308,7 +310,7 @@ def _spawn_daemon() -> None:
 
 def ensure_daemon() -> None:
     status = _health_status()
-    if status and status.get("authRequired") is not True:
+    if status and (status.get("authRequired") is not True or status.get("version") != SERVER_VERSION):
         raise RuntimeError("DomA bridge daemon is outdated; stop it and start the updated daemon")
     if status:
         return
@@ -320,7 +322,7 @@ def ensure_daemon() -> None:
     deadline = time.time() + ENSURE_TIMEOUT_SEC
     while time.time() < deadline:
         status = _health_status()
-        if status and status.get("authRequired") is not True:
+        if status and (status.get("authRequired") is not True or status.get("version") != SERVER_VERSION):
             raise RuntimeError("DomA bridge daemon is outdated; stop it and start the updated daemon")
         if status:
             print("[mcp-stdio] daemon ready", file=sys.stderr)
@@ -518,8 +520,14 @@ def main() -> None:
 
     threading.Thread(target=_heartbeat_loop, name="doma-agent-hb", daemon=True).start()
 
-    for line in sys.stdin:
-        line = line.strip()
+    # MCP stdio is UTF-8 regardless of the Windows console code page. Reading
+    # sys.stdin as text can produce surrogateescape characters for Chinese input.
+    for raw_line in sys.stdin.buffer:
+        try:
+            line = raw_line.decode("utf-8", errors="strict").strip()
+        except UnicodeDecodeError as e:
+            print(f"invalid UTF-8 MCP request: {e}", file=sys.stderr)
+            continue
         if not line:
             continue
         try:
@@ -528,6 +536,12 @@ def main() -> None:
             print(f"invalid json: {e}", file=sys.stderr)
             continue
         if not isinstance(msg, dict):
+            continue
+        try:
+            json.dumps(msg, ensure_ascii=False).encode("utf-8", errors="strict")
+        except UnicodeEncodeError:
+            if msg.get("id") is not None:
+                _reply_error(msg["id"], -32602, "MCP request contains invalid Unicode")
             continue
         try:
             handle_request(msg)
