@@ -7,6 +7,7 @@
   "description": "Conversation is action. The open-source version of DomA — an AI automation agent for the browser.",
   "scripts": {
     "clean": "rm -rf dist/",
+    "verify:no-personal-paths": "node scripts/check-no-personal-paths.mjs",
     "verify:mcp-release": "node scripts/verify-mcp-release.mjs",
     "sync:edition-ts": "node scripts/sync-edition-tsconfig.mjs",
     "dev:worker": "VITE_BUILD_EDITION=open npm run sync:edition-ts && BUILD_TYPE=dev VITE_BUILD_EDITION=open vite build -c inline-builder.ts --mode desktop-open --watch",
@@ -15,7 +16,7 @@
     "desktop-build": "VITE_BUILD_EDITION=open npm run sync:edition-ts && BUILD_TYPE=pro VITE_BUILD_EDITION=open vite build --mode desktop-open",
     "dev": "VITE_BUILD_EDITION=open npm run sync:edition-ts && npm-run-all --parallel clean desktop-dev dev:worker",
     "dev:open": "npm run dev",
-    "build": "npm run verify:mcp-release && VITE_BUILD_EDITION=open npm run sync:edition-ts && npm-run-all --sequential desktop-build build:worker",
+    "build": "npm run verify:no-personal-paths && npm run verify:mcp-release && VITE_BUILD_EDITION=open npm run sync:edition-ts && npm-run-all --sequential desktop-build build:worker",
     "build:open": "npm run build",
     "dev:firefox-worker": "BUILD_TYPE=dev vite build -c inline-builder.ts --mode desktop-firefox --watch",
     "build:firefox-worker": "BUILD_TYPE=pro vite build -c inline-builder.ts --mode desktop-firefox",

@@ -110,6 +110,7 @@
       <div class="mcp-section">
         <div class="mcp-section-title">{{ t("chat.mcp.configTitle") }}</div>
         <p class="mcp-hint">{{ t("chat.mcp.configHint") }}</p>
+        <p class="mcp-hint">{{ t("chat.mcp.configPrivacyHint") }}</p>
         <div class="mcp-section-subtitle">Codex</div>
         <pre class="mcp-code">{{ codexConfig }}</pre>
         <button type="button" class="mcp-copy-btn" aria-live="polite" @click="copyText(codexConfig, 'codex')">
@@ -203,8 +204,8 @@ const versionCompatible = computed(() => {
   return !!state?.installed && state.installedVersion === mcpRelease.version &&
     (!state.daemonRunning || state.bridgeProtocolVersion === mcpRelease.bridgeProtocolVersion);
 });
-const pythonCommand = computed(() => managerStatus.value?.pythonCommand || "python3");
-const scriptPath = computed(() => managerStatus.value?.scriptPath || "$HOME/.doma/mcp/doma_mcp_stdio.py");
+const pythonCommand = computed(() => managerStatus.value?.pythonCommand || (isWindows ? "<absolute-path-to-python.exe>" : "python3"));
+const scriptPath = computed(() => managerStatus.value?.scriptPath || "/absolute/path/to/.doma/mcp/doma_mcp_stdio.py");
 const configJson = computed(() => JSON.stringify({
   mcpServers: { DomA: { command: pythonCommand.value, args: [scriptPath.value] } },
 }, null, 2));

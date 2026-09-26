@@ -226,7 +226,9 @@ export default {
         installHintLegacy: "Open a terminal in this fork's mcp-bridge directory and run the local command below. This browser cannot use the GUI manager; enter the installed stdio script's absolute path in your desktop agent's MCP configuration.",
         configTitle: "2. MCP config",
         configHint:
-          "After installing the companion, copy only your desktop agent's config into its MCP settings, save it, then restart the agent. If the manager is not connected, replace template paths with the local absolute paths. Start the local service, allow the extension to receive MCP tasks, and keep this side panel open while using the agent.",
+          "After installing the companion, copy only your desktop agent's config into its MCP settings, save it, then restart the agent. If the manager is not connected, replace the template command and path with local absolute values. Start the local service, allow the extension to receive MCP tasks, and keep this side panel open while using the agent.",
+        configPrivacyHint:
+          "Paths shown here are generated locally. DomA only displays or copies them on this device; it does not write them into the project or upload them.",
         copyCmd: "Copy install command",
         copyConfig: "Copy config JSON",
         copyCodexConfig: "Copy Codex TOML",
@@ -738,7 +740,9 @@ export default {
         installHintLegacy: "在当前 fork 的 mcp-bridge 目录打开终端，运行下方本地命令。此浏览器无法使用图形界面管理器；请在桌面 Agent 配置中填入已安装 stdio 脚本的绝对路径。",
         configTitle: "2. MCP 配置",
         configHint:
-          "安装配套程序后，只复制与你使用的桌面 Agent 对应的配置，粘贴到它的 MCP 设置中，保存后重启 Agent。管理器未连接时，请把模板路径替换为本机绝对路径。使用时启动本机服务、允许扩展接收 MCP 任务，并保持本侧栏打开。",
+          "安装配套程序后，只复制与你使用的桌面 Agent 对应的配置，粘贴到它的 MCP 设置中，保存后重启 Agent。管理器未连接时，请把模板命令和路径替换为本机绝对值。使用时启动本机服务、允许扩展接收 MCP 任务，并保持本侧栏打开。",
+        configPrivacyHint:
+          "此处路径由本机动态生成，DomA 只在当前设备上显示或复制，不会写入项目或上传。",
         copyCmd: "复制安装命令",
         copyConfig: "复制配置 JSON",
         copyCodexConfig: "复制 Codex TOML",
