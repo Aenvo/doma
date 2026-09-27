@@ -8,7 +8,9 @@ import { sendToSidePanel } from "@/edition/sendToSidePanel";
  *
  * [已做] Client 发 mcp/request：SW 挂起时 sendMessage 重试（send 本身不 await，避免阻塞 connect）
  *
- * [已做] Server 回 mcp/response：经 sendToSidePanel（Chrome runtime；Safari tabs→panelShell）
+ * [已做] Server 回 mcp/response 经 sendToSidePanel（Chrome runtime；Safari tabs→panelShell）。
+ * LLM 工具定义现在本地读取，tools/call 走 service-worker 的
+ * chat/runBrowserTool + sendResponse 同一 channel；本 transport 仅保留协议兼容。
  *
  * 相关：service-worker.ts listener(mcp/request)、llm entry onMessage(mcp/response)
  *

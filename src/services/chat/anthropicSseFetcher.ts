@@ -5,13 +5,13 @@
  * tool_call 形状对齐 OpenAI function calling，便于 UI 回调复用。
  */
 import type { LlmTokenUsage } from './llm/contextUsage';
-import { HttpError, type SseEvent } from './sseFetcher';
+import {
+  HttpError,
+  readStreamChunkWithIdleTimeout,
+  type SseEvent,
+} from './sseFetcher';
 
 const ANTHROPIC_VERSION = '2023-06-01';
-
-function throwHttpError(response: Response): never {
-  throw new HttpError(response.status);
-}
 
 function usageFromAnthropic(raw: unknown): LlmTokenUsage | null {
   if (!raw || typeof raw !== 'object') return null;
@@ -114,7 +114,7 @@ export async function* fetchAnthropicSSE(
       }
       break;
     }
-    const { done, value } = await reader.read();
+    const { done, value } = await readStreamChunkWithIdleTimeout(reader);
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split(/\r\n|\n/);
@@ -206,7 +206,13 @@ export async function* fetchAnthropicSSE(
     yield* flushTools();
   }
 
-  yield { type: 'done', content: '', toolCalls: [], msgId };
+  yield {
+    type: 'done',
+    content: '',
+    toolCalls: [],
+    msgId,
+    ...(stopReason ? { finishReason: stopReason } : {}),
+  };
 }
 
 export { ANTHROPIC_VERSION };

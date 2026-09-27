@@ -21,11 +21,11 @@ import {
 } from "./scheduledMessagesAlarms";
 import { tryEnsureEditionSidePanel } from "@/edition/editionSwHooks";
 import { sendToSidePanel } from "@/edition/sendToSidePanel";
+import { openTabSidePanel } from "@/edition/chromeSidePanel";
 
 export type { ScheduledFirePayload };
 export { armScheduledAlarm, clearScheduledAlarm };
 
-const SIDE_PANEL_PATH = "popup/index.html#sidepannel";
 const PING_OPERATE = "chat/scheduledPing";
 const FIRE_OPERATE = "chat/scheduledFire";
 
@@ -33,10 +33,10 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function pingSidePanel(): Promise<boolean> {
+async function pingSidePanel(targetPanelTabId?: number): Promise<boolean> {
   try {
     const res = await sendToSidePanel<{ ok?: boolean; success?: boolean }>(
-      { operate: PING_OPERATE },
+      { operate: PING_OPERATE, targetPanelTabId },
       { timeoutMs: 5_000 },
     );
     const ok = !!(res && (res.ok === true || res.success === true));
@@ -48,42 +48,34 @@ async function pingSidePanel(): Promise<boolean> {
   }
 }
 
-async function openSidePanel(): Promise<void> {
+async function findLivePanelTabId(): Promise<number | undefined> {
   const browser = getContext().browser as any;
-  if (!browser.sidePanel?.setOptions) {
-    console.warn("[scheduled] sidePanel.setOptions missing");
-    return;
-  }
-
-  console.log("[scheduled] opening side panel…");
-  await browser.sidePanel.setOptions({
-    path: SIDE_PANEL_PATH,
-    enabled: true,
-  });
-
-  let windowId: number | undefined;
+  if (!browser.runtime?.getContexts) return undefined;
   try {
-    const win = await browser.windows.getLastFocused();
-    if (win?.id != null) windowId = win.id;
-  } catch {
-    // ignore
-  }
-
-  if (windowId != null && browser.sidePanel.open) {
-    try {
-      await browser.sidePanel.open({ windowId });
-      console.log("[scheduled] sidePanel.open ok", { windowId });
-    } catch (e) {
-      console.warn("[scheduled] sidePanel.open failed", e);
+    const contexts = await browser.runtime.getContexts({ contextTypes: ["SIDE_PANEL"] });
+    for (const context of contexts) {
+      const raw = new URL(context.documentUrl || "").searchParams.get("domaTabId");
+      const tabId = Number(raw);
+      if (Number.isInteger(tabId) && tabId > 0) return tabId;
     }
-  } else {
-    console.warn("[scheduled] no windowId for sidePanel.open", { windowId });
+  } catch (error) {
+    console.warn("[scheduled] getContexts failed", error);
   }
+  return undefined;
+}
 
+async function openSidePanel(): Promise<number | undefined> {
+  const browser = getContext().browser as any;
   try {
+    const win = await browser.windows.getLastFocused({ populate: true });
+    const tab = win?.tabs?.find((item: { active?: boolean }) => item.active);
+    if (typeof tab?.id !== "number") return undefined;
+    await openTabSidePanel(tab.id);
     await Storage.init().set("doma_agent_side_pannel_status", true);
-  } catch {
-    // ignore
+    return tab.id;
+  } catch (error) {
+    console.warn("[scheduled] tab side panel open failed", error);
+    return undefined;
   }
 }
 
@@ -91,23 +83,27 @@ async function openSidePanel(): Promise<void> {
 export async function ensureSidePanelReady(opts?: {
   maxWaitMs?: number;
   intervalMs?: number;
-}): Promise<boolean> {
-  if (await pingSidePanel()) return true;
+}): Promise<{ ready: boolean; targetPanelTabId?: number }> {
+  const existingTabId = await findLivePanelTabId();
+  if (existingTabId != null && await pingSidePanel(existingTabId)) {
+    return { ready: true, targetPanelTabId: existingTabId };
+  }
 
   // Pro Safari：页内 iframe（edition overlay）；Open / Chrome 返回 false 后走下方原生 sidePanel
-  if (await tryEnsureEditionSidePanel(opts)) return true;
+  if (await tryEnsureEditionSidePanel(opts)) return { ready: true };
 
-  await openSidePanel();
+  const targetPanelTabId = await openSidePanel();
+  if (targetPanelTabId == null) return { ready: false };
 
   const maxWaitMs = opts?.maxWaitMs ?? 8000;
   const intervalMs = opts?.intervalMs ?? 250;
   const deadline = Date.now() + maxWaitMs;
   while (Date.now() < deadline) {
     await sleep(intervalMs);
-    if (await pingSidePanel()) return true;
+    if (await pingSidePanel(targetPanelTabId)) return { ready: true, targetPanelTabId };
   }
   console.warn("[scheduled] side panel not ready after wait", { maxWaitMs });
-  return false;
+  return { ready: false };
 }
 
 async function deliverFire(row: ScheduledMessage): Promise<boolean> {
@@ -117,7 +113,7 @@ async function deliverFire(row: ScheduledMessage): Promise<boolean> {
     textLen: row.text?.length ?? 0,
   });
   const ready = await ensureSidePanelReady();
-  if (!ready) {
+  if (!ready.ready) {
     console.warn("[scheduled] side panel not ready, fire aborted", row.id);
     await patchScheduledMessage(row.id, {
       status: "error",
@@ -137,6 +133,7 @@ async function deliverFire(row: ScheduledMessage): Promise<boolean> {
     const res = await sendToSidePanel<{ ok?: boolean; success?: boolean }>({
       operate: FIRE_OPERATE,
       payload,
+      targetPanelTabId: ready.targetPanelTabId,
     });
     const ok = !!(res && (res.ok === true || res.success === true));
     console.log("[scheduled] deliverFire sendMessage result", { id: row.id, ok, res });

@@ -27,6 +27,9 @@ import {
   initEditionBackground,
   registerEditionTabListeners,
   configureGlobalSidePanel,
+  configureTabSidePanel,
+  configureExistingTabSidePanels,
+  configureTabScopedSidePanelAction,
   registerNativeSidePanelListeners,
   handleBrowserActionClicked,
 } from "@/edition/editionSwHooks";
@@ -56,7 +59,6 @@ import { StayWebExtensionHandler } from "@/services/extension/StayWebExtensionHa
 import { rememberSafariMcpRequestTab } from "@/services/chat/safariPanelHostTab";
 
 class Background{
-    showSidePanel: boolean = false;
     fileLoaderHandler?: any;
     extensionHandler: StayWebExtensionHandler;
     transport = new ExtensionServerTransport();
@@ -68,13 +70,35 @@ class Background{
       this.extensionHandler = new StayWebExtensionHandler();
       // MCP 下行统一走 sendToSidePanel（Safari 由 adapter 经 panelShell 中转）
       this.mcpServer = createMcpServer(this.transport);
-      (async () => {
-        this.showSidePanel = await Storage.init().get("doma_agent_side_pannel_status") || false;
-      })();
-      
+      // Register synchronously: action clicks can wake a suspended service worker.
+      const browser = getContext().browser;
+      browser.action.onClicked.addListener(handleBrowserActionClicked);
+      const configureTab = (tabId: number) => {
+        void configureTabSidePanel(tabId).catch((error: unknown) => {
+          console.warn("[sidePanel] failed to configure tab panel", tabId, error);
+        });
+      };
+      browser.tabs.onCreated.addListener((tab: { id?: number }) => {
+        if (typeof tab.id === "number") configureTab(tab.id);
+      });
+      browser.tabs.onActivated.addListener(({ tabId }: { tabId: number }) => configureTab(tabId));
+      void configureGlobalSidePanel(false)
+        .then(configureExistingTabSidePanels)
+        .then(configureTabScopedSidePanelAction)
+        .catch((error: unknown) => {
+          console.warn("[sidePanel] failed to initialize tab panels", error);
+        });
+      registerNativeSidePanelListeners({
+        onClosed: () => {
+          void Storage.init().set("doma_agent_side_pannel_status", false);
+        },
+        onOpened: () => {
+          void Storage.init().set("doma_agent_side_pannel_status", true);
+        },
+      });
     }
 
-    /** 窗口级侧栏：不按 tabId 绑定，避免每 tab 一份 ChatPanel 实例 */
+    /** Disable the manifest fallback; action clicks enable only the clicked tab. */
     private async setGlobalSidePanelEnabled(enabled: boolean): Promise<void> {
       await configureGlobalSidePanel(enabled);
     }
@@ -659,50 +683,15 @@ class Background{
       getContext().browser.runtime.onInstalled.addListener(async ({reason}: { reason: string }) => {
         console.log("onInstalled================", reason);
         if (reason === 'install') {
-          this.showSidePanel = false;
           await Storage.init().set("doma_agent_side_pannel_status", false);
         }
       });
 
       await initEditionBackground(swCtx);
 
-      await this.setGlobalSidePanelEnabled(true);
+      await this.setGlobalSidePanelEnabled(false);
 
       registerScheduledAlarmsListener();
-
-      getContext().browser.action.onClicked.addListener((tab: any) => {
-        const tabId = typeof tab?.id === "number" ? tab.id : undefined;
-        const url =
-          typeof tab?.url === "string" ? String(tab.url).slice(0, 160) : undefined;
-        console.warn("[ACTION] onClicked received", {
-          tabId,
-          url,
-          showSidePanel: this.showSidePanel,
-          t: Date.now(),
-        });
-        handleBrowserActionClicked(tab, {
-          showSidePanel: this.showSidePanel,
-          setShowSidePanel: (open) => {
-            this.showSidePanel = open;
-          },
-        });
-      });
-      if (isSafariBuild()) {
-        console.warn("[ACTION] onClicked listener registered (no default_popup)", {
-          t: Date.now(),
-        });
-      }
-
-      registerNativeSidePanelListeners({
-        onClosed: () => {
-          this.showSidePanel = false;
-          void Storage.init().set("doma_agent_side_pannel_status", false);
-        },
-        onOpened: () => {
-          this.showSidePanel = true;
-          void Storage.init().set("doma_agent_side_pannel_status", true);
-        },
-      });
 
       getContext().browser.webNavigation.onBeforeNavigate.addListener((detail: any)=>{
         if(detail){

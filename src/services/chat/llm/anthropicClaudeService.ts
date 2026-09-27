@@ -7,7 +7,23 @@ import {
   type ConversationMessage,
   type LlmToolCallResult,
 } from './llmTypes';
-import { LlmService } from './llmService';
+import {
+  EMPTY_RESPONSE_RECOVERY_PROMPT,
+  EmptyAssistantResponseError,
+  type LlmCallOutcome,
+  LlmService,
+  MAX_EMPTY_RESPONSE_RECOVERIES,
+  ToolRoundLimitError,
+  toolErrorPayload,
+} from './llmService';
+import {
+  appendRuntimeControl,
+  createToolLoopState,
+  finalAnswerControlInstruction,
+  recordToolRound,
+  type LlmRequestControl,
+  type ToolLoopState,
+} from './toolLoopGuard';
 import { materializeToolResultContent } from './contextManager';
 import { buildBrowserAssistantSystemPromptParts } from '../slashSkills';
 import { formatSomScreenshotContext } from '../somElementsSchema';
@@ -25,7 +41,6 @@ import {
 } from '../anthropicSseFetcher';
 import type { McpClient } from '@/services/mcp/mcpClient';
 import type { LlmSendMessageOptions } from './llmTypes';
-import type { ToolResult } from '@/services/mcp/mcpServer';
 import { prepareLlmHistory } from './contextManager';
 import {
   buildAskPageToolBlockedPayload,
@@ -38,6 +53,7 @@ import {
   markTextOnlyToolRecoveryUsed,
   shouldForceToolRecovery,
 } from './textOnlyToolRecovery';
+import { callBrowserToolViaRuntime } from './browserToolRuntimeClient';
 
 type ClaudeBlock = Record<string, unknown>;
 
@@ -163,13 +179,24 @@ export class AnthropicClaudeService extends LlmService {
     _site: string,
     _ever: string,
     history: ClaudeHistoryMsg[],
+    requestControl: LlmRequestControl = {},
   ): Promise<RequestInit> {
     const { systemContent, basePrompt, skillSection } =
       await buildBrowserAssistantSystemPromptParts(BROWSER_ASSISTANT_SYSTEM_PROMPT);
-    const openaiTools = [...(await this.mcpClient.getLlmTools())];
+    const controlledSystemContent = appendRuntimeControl(
+      systemContent,
+      requestControl,
+    );
+    const openaiTools = requestControl.disableTools
+      ? []
+      : [...(await this.mcpClient.getLlmTools())];
     const tools = openaiToolsToClaude(openaiTools);
     armTurnUsageFixed(conversationId, {
-      system: estimateTextTokens(basePrompt),
+      system: estimateTextTokens(
+        requestControl.controlInstruction
+          ? `${basePrompt}\n${requestControl.controlInstruction}`
+          : basePrompt,
+      ),
       skills: estimateTextTokens(skillSection),
       tools: estimateJsonTokens(tools),
       summarized: estimateSummarizedInHistory(history as ConversationMessage[]),
@@ -179,8 +206,8 @@ export class AnthropicClaudeService extends LlmService {
       model: this.model,
       max_tokens: 4096,
       stream: true,
-      system: systemContent,
-      tools,
+      system: controlledSystemContent,
+      ...(requestControl.disableTools ? {} : { tools }),
       messages: toAnthropicMessages(history),
       ...(this.consumeToolChoice() === "required"
         ? { tool_choice: { type: "any" as const } }
@@ -213,7 +240,10 @@ export class AnthropicClaudeService extends LlmService {
     options: LlmSendMessageOptions,
     msgIds: string[],
     signal: AbortSignal,
-  ): Promise<void> {
+    toolLoopState: ToolLoopState = createToolLoopState(),
+    emptyResponseRecoveries = 0,
+    requestControl: LlmRequestControl = {},
+  ): Promise<LlmCallOutcome> {
     console.log(`Calling ${this.getName()} llm with model ${this.model}`);
     const msgId = `msg-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const claudeHistory = history as ClaudeHistoryMsg[];
@@ -242,6 +272,7 @@ export class AnthropicClaudeService extends LlmService {
           site,
           ever,
           claudeHistory,
+          requestControl,
         ),
         msgId,
         signal,
@@ -252,9 +283,11 @@ export class AnthropicClaudeService extends LlmService {
         }
         if (sseEvent.type === 'text') {
           assistantText += sseEvent.content;
-          options.onTextMessage(_conversationId, sseEvent.msgId!, sseEvent.content);
         }
         if (sseEvent.type === 'tool_call') {
+          if (requestControl.disableTools) {
+            throw new ToolRoundLimitError();
+          }
           if (assistantText.trim()) {
             contentBlocks.push({ type: 'text', text: assistantText });
           }
@@ -292,75 +325,62 @@ export class AnthropicClaudeService extends LlmService {
           for (const toolCall of sseEvent.toolCalls || []) {
             if (toolCall.type !== 'function') continue;
             options.onToolCallStart(_conversationId, sseEvent.msgId!, toolCall);
-            let toolArgs: Record<string, unknown>;
+            let result: unknown;
             try {
-              toolArgs = parseToolArguments(
+              const toolArgs = parseToolArguments(
                 toolCall.function.arguments,
                 toolCall.function.name,
               );
-            } catch (parseErr) {
-              const errMsg =
-                parseErr instanceof Error ? parseErr.message : String(parseErr);
+              toolArgs.conversationId = _conversationId;
+
+              if (
+                isAskModeRound(claudeHistory) &&
+                isAskBlockedPageTool(toolCall.function.name, toolArgs)
+              ) {
+                result = buildAskPageToolBlockedPayload(
+                  toolCall.function.name,
+                  getLastUserVisibleGoal(claudeHistory),
+                );
+              } else {
+                const timeoutMs =
+                  typeof toolArgs.timeoutMs === 'number' &&
+                  Number.isFinite(toolArgs.timeoutMs)
+                    ? Math.max(1, Math.floor(toolArgs.timeoutMs))
+                    : 60_000;
+                result = await callBrowserToolViaRuntime(
+                  toolCall.function.name,
+                  toolArgs,
+                  timeoutMs,
+                  signal,
+                );
+              }
+            } catch (toolError) {
+              if ((toolError as { name?: string })?.name === 'AbortError' || signal.aborted) {
+                throw toolError;
+              }
+              console.warn('[Anthropic] Tool call failed; returning error to model', {
+                conversationId: _conversationId,
+                toolName: toolCall.function.name,
+                error: toolError instanceof Error ? toolError.message : String(toolError),
+              });
+              result = toolErrorPayload(toolCall.function.name, toolError);
+            }
+
+            try {
+              const overrideResult = await options.onToolCallOverride(
+                _conversationId,
+                sseEvent.msgId!,
+                toolCall,
+                result,
+              );
               llmToolCallResults.push({
                 tool_call_id: toolCall.id,
-                result: {
-                  content: [
-                    {
-                      type: 'text',
-                      text: JSON.stringify({ ok: false, error: errMsg }),
-                    },
-                  ],
-                },
+                result: overrideResult ?? result,
                 name: toolCall.function.name,
               });
+            } finally {
               options.onToolCallDone(_conversationId, sseEvent.msgId!, toolCall);
-              continue;
             }
-            toolArgs.conversationId = _conversationId;
-
-            let result: unknown;
-            if (
-              isAskModeRound(claudeHistory) &&
-              isAskBlockedPageTool(toolCall.function.name, toolArgs)
-            ) {
-              result = buildAskPageToolBlockedPayload(
-                toolCall.function.name,
-                getLastUserVisibleGoal(claudeHistory),
-              );
-            } else {
-              const timeoutMs =
-                typeof toolArgs.timeoutMs === 'number' &&
-                Number.isFinite(toolArgs.timeoutMs)
-                  ? Math.max(1, Math.floor(toolArgs.timeoutMs))
-                  : 60_000;
-              const toolResult = (await this.mcpClient.callTool(
-                {
-                  name: toolCall.function.name,
-                  arguments: toolArgs,
-                },
-                undefined,
-                { timeout: timeoutMs, maxTotalTimeout: timeoutMs },
-              )) as ToolResult;
-              const firstContent = toolResult.content[0];
-              const firstText =
-                firstContent && firstContent.type === 'text' ? firstContent.text : '';
-              result = firstText.startsWith('__JSON__')
-                ? JSON.parse(firstText.slice(8))
-                : firstText;
-            }
-
-            const overrideResult = await options.onToolCallOverride(
-              _conversationId,
-              sseEvent.msgId!,
-              toolCall,
-              result,
-            );
-            llmToolCallResults.push({
-              tool_call_id: toolCall.id,
-              result: overrideResult || result,
-              name: toolCall.function.name,
-            });
-            options.onToolCallDone(_conversationId, sseEvent.msgId!, toolCall);
           }
 
           await this.processToolResults(
@@ -373,8 +393,41 @@ export class AnthropicClaudeService extends LlmService {
             _conversationId,
             llmToolCallResults,
           );
-          if (halt) return;
-          await this.call(
+          if (halt) return 'done';
+          const decision = recordToolRound(
+            toolLoopState,
+            sseEvent.toolCalls || [],
+            llmToolCallResults,
+          );
+          if (decision.kind === 'finalize') {
+            console.warn('[Anthropic] Finalizing tool loop', {
+              conversationId: _conversationId,
+              reason: decision.reason,
+              roundsCompleted: toolLoopState.roundsCompleted,
+              totalToolCalls: toolLoopState.totalToolCalls,
+            });
+            return await this.call(
+              _conversationId,
+              userId,
+              deviceId,
+              site,
+              ever,
+              claudeHistory,
+              options,
+              msgIds,
+              signal,
+              toolLoopState,
+              emptyResponseRecoveries,
+              {
+                disableTools: true,
+                controlInstruction: finalAnswerControlInstruction(
+                  toolLoopState,
+                  decision.reason,
+                ),
+              },
+            );
+          }
+          return await this.call(
             _conversationId,
             userId,
             deviceId,
@@ -384,19 +437,58 @@ export class AnthropicClaudeService extends LlmService {
             options,
             msgIds,
             signal,
+            toolLoopState,
+            emptyResponseRecoveries,
+            decision.controlInstruction
+              ? { controlInstruction: decision.controlInstruction }
+              : {},
           );
-          return;
         }
       }
 
       if (assistantText) {
         claudeHistory.push({ role: 'assistant', content: assistantText });
       }
-      options.onMessageDone(_conversationId, msgId);
-
+      if (!assistantText.trim()) {
+        options.onMessageDone(_conversationId, msgId);
+        if (
+          emptyResponseRecoveries < MAX_EMPTY_RESPONSE_RECOVERIES &&
+          !signal.aborted
+        ) {
+          console.warn('[Anthropic] Empty final response; retrying once', {
+            conversationId: _conversationId,
+          });
+          const recoveryMessage: ClaudeHistoryMsg = {
+            role: 'user',
+            content: EMPTY_RESPONSE_RECOVERY_PROMPT,
+          };
+          claudeHistory.push(recoveryMessage);
+          try {
+            return await this.call(
+              _conversationId,
+              userId,
+              deviceId,
+              site,
+              ever,
+              claudeHistory,
+              options,
+              msgIds,
+              signal,
+              toolLoopState,
+              emptyResponseRecoveries + 1,
+              requestControl,
+            );
+          } finally {
+            const recoveryIndex = claudeHistory.indexOf(recoveryMessage);
+            if (recoveryIndex >= 0) claudeHistory.splice(recoveryIndex, 1);
+          }
+        }
+        throw new EmptyAssistantResponseError();
+      }
       if (
         assistantText.trim() &&
         !signal.aborted &&
+        !requestControl.disableTools &&
         (await shouldForceToolRecovery({
           conversationId: _conversationId,
           history,
@@ -415,25 +507,35 @@ export class AnthropicClaudeService extends LlmService {
           provider: 'anthropic',
           textPreview: assistantText.trim().slice(0, 80),
         });
-        await this.call(
+        options.onMessageDone(_conversationId, msgId);
+        return await this.call(
           _conversationId,
           userId,
           deviceId,
           site,
           ever,
-          history,
+          claudeHistory,
           options,
           msgIds,
           signal,
+          toolLoopState,
+          emptyResponseRecoveries,
+          {},
         );
       }
+
+      // Claude 也可能在 tool_use 前输出阶段性说明；仅最终无工具轮次进入聊天正文。
+      options.onTextMessage(_conversationId, msgId, assistantText);
+      options.onMessageDone(_conversationId, msgId);
+      return 'done';
     } catch (e) {
       if ((e as { name?: string })?.name === 'AbortError' || signal?.aborted) {
         console.log(`[${this.getName()}] Request aborted`);
-        return;
+        return 'aborted';
       }
       console.error(`[${this.getName()}] API call failed:`, e);
-      options.onMessageError(_conversationId, msgId, e as Error);
+      await options.onMessageError(_conversationId, msgId, e as Error);
+      return 'error';
     }
   }
 
@@ -599,21 +701,30 @@ export class AnthropicClaudeService extends LlmService {
 
     const last = h[lastAssistantIndex];
     const blocks = Array.isArray(last.content) ? last.content : [];
-    const hasToolUse = blocks.some((b) => b.type === 'tool_use');
-    if (!hasToolUse) return;
+    const expectedIds = new Set(
+      blocks
+        .filter((block) => block.type === 'tool_use')
+        .map((block) => typeof block.id === 'string' ? block.id : '')
+        .filter(Boolean),
+    );
+    if (expectedIds.size === 0) return;
 
-    let hasToolResult = false;
+    const respondedIds = new Set<string>();
     for (let i = lastAssistantIndex + 1; i < h.length; i++) {
       const c = h[i].content;
       if (h[i].role === 'user' && Array.isArray(c)) {
-        if (c.some((b) => b.type === 'tool_result')) {
-          hasToolResult = true;
-          break;
+        for (const block of c) {
+          if (block.type === 'tool_result' && typeof block.tool_use_id === 'string') {
+            respondedIds.add(block.tool_use_id);
+          }
         }
       }
     }
-    if (!hasToolResult) {
-      console.log('[Anthropic] Removing incomplete tool_use from history');
+    if ([...expectedIds].some((id) => !respondedIds.has(id))) {
+      console.log('[Anthropic] Removing incomplete tool_use from history', {
+        expected: [...expectedIds],
+        responded: [...respondedIds],
+      });
       h.splice(lastAssistantIndex, h.length - lastAssistantIndex);
     }
   }

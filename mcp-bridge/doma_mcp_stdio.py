@@ -25,13 +25,16 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from bridge_auth import load_or_create_token
+
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "doma"
-SERVER_VERSION = "0.6.0"
+SERVER_VERSION = "0.7.4"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONTROL_PORT = int(os.environ.get("DOMA_CONTROL_PORT", "3846"))
 CONTROL_BASE = f"http://127.0.0.1:{CONTROL_PORT}"
+_LOCAL_HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 DAEMON_SCRIPT = os.environ.get(
     "DOMA_DAEMON_SCRIPT",
     os.path.join(HERE, "doma_bridge_daemon.py"),
@@ -53,10 +56,14 @@ TOOL_START_GROUP_CONVERSATION = {
         "Do NOT require the user to say DomA — any web browsing / search / scrape request is enough. "
         "If you already have a conversationId for this task from an earlier start in this chat, "
         "use browser_send_conversation_message instead of starting a new conversation. "
+        "The task runs on a webpage whose DomA side panel is open. If multiple pages qualify, "
+        "the tool returns status=ambiguous with candidates; ask the user which page they mean, "
+        "then retry with that candidate's targetTabId. Do not guess. "
         "Workflow: call this tool with a clear natural-language task (set callerAgent to your agent name), "
         "then poll browser_get_conversation_result with the returned conversationId until "
-        "status is done or error. "
-        "Returns JSON: { ok, text, conversationId, status, callerAgent, bridgeConnected }. "
+        "status is done, needs_user_input, or error. Ask the user when input is needed, "
+        "then continue with browser_send_conversation_message using the same conversationId. "
+        "Returns JSON including ok, text, conversationId, requestId, status, targetTitle, targetUrl, sources, artifacts. "
         "Safe for multiple desktop agents: all share one local DomA bridge daemon."
     ),
     "inputSchema": {
@@ -68,6 +75,10 @@ TOOL_START_GROUP_CONVERSATION = {
                     "Natural-language browser task, e.g. "
                     "\"Open baidu.com, search doma agent, return all first-page result titles.\""
                 ),
+            },
+            "targetTabId": {
+                "type": "integer",
+                "description": "Optional tab ID selected by the user from an earlier ambiguous result; do not invent it.",
             },
             "callerAgent": {
                 "type": "string",
@@ -109,8 +120,8 @@ TOOL_SEND_CONVERSATION_MESSAGE = {
         "send more instructions / attach more files / ask DomA to recognize an image after a prior task). "
         "Do NOT start a new conversation for follow-ups. "
         "Requires conversationId + text; optional attachments (base64). "
-        "After calling, poll browser_get_conversation_result with the SAME conversationId until done/error. "
-        "Returns JSON: { ok, text, conversationId, status, callerAgent, bridgeConnected }."
+        "After calling, poll browser_get_conversation_result with the SAME conversationId until done, needs_user_input, or error. "
+        "Returns JSON including ok, text, conversationId, requestId, status, sources, artifacts."
     ),
     "inputSchema": {
         "type": "object",
@@ -165,9 +176,10 @@ TOOL_GET_CONVERSATION_RESULT = {
         "Poll status/result of a DomA real-browser task started by browser_start_group_conversation "
         "or continued by browser_send_conversation_message. "
         "Required after every start or send: call repeatedly with the SAME conversationId until "
-        "status is done or error, then return the final text to the user. "
-        "Returns JSON: { ok, text, conversationId, status, callerAgent, bridgeConnected } "
-        "(status: pending|running|done|error)."
+        "status is done, needs_user_input, or error. Return the full final text and usable "
+        "sources/artifacts to the user; for needs_user_input ask the user and continue the same conversation. "
+        "Returns JSON including ok, text, conversationId, requestId, targetTitle, targetUrl, "
+        "sources, artifacts, status (pending|running|done|needs_user_input|error)."
     ),
     "inputSchema": {
         "type": "object",
@@ -220,7 +232,9 @@ TOOLS = [
 
 
 def _send(msg: dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(msg, ensure_ascii=False) + "\n")
+    # MCP stdio is UTF-8. ASCII escapes keep the wire format valid even when
+    # Windows starts Python with a legacy console encoding for redirected stdout.
+    sys.stdout.write(json.dumps(msg, ensure_ascii=True) + "\n")
     sys.stdout.flush()
 
 
@@ -234,12 +248,15 @@ def _reply_error(req_id: Any, code: int, message: str) -> None:
 
 def _http_json(method: str, url: str, body: Any = None, timeout: float = 120.0) -> dict[str, Any]:
     data = None
-    headers = {"Accept": "application/json"}
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {load_or_create_token()}",
+    }
     if body is not None:
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
         headers["Content-Type"] = "application/json; charset=utf-8"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with _LOCAL_HTTP.open(req, timeout=timeout) as resp:
         raw = resp.read().decode("utf-8")
         parsed = json.loads(raw) if raw else {}
         if not isinstance(parsed, dict):
@@ -247,12 +264,19 @@ def _http_json(method: str, url: str, body: Any = None, timeout: float = 120.0) 
         return parsed
 
 
-def _health_ok() -> bool:
+def _health_status() -> dict[str, Any] | None:
     try:
         out = _http_json("GET", f"{CONTROL_BASE}/v1/health", timeout=1.5)
-        return bool(out.get("ok"))
+        if out.get("ok") and out.get("role") == "doma-bridge-daemon":
+            return out
     except Exception:
-        return False
+        pass
+    return None
+
+
+def _health_ok() -> bool:
+    out = _health_status()
+    return bool(out and out.get("authRequired") is True)
 
 
 def _spawn_daemon() -> None:
@@ -285,7 +309,10 @@ def _spawn_daemon() -> None:
 
 
 def ensure_daemon() -> None:
-    if _health_ok():
+    status = _health_status()
+    if status and (status.get("authRequired") is not True or status.get("version") != SERVER_VERSION):
+        raise RuntimeError("DomA bridge daemon is outdated; stop it and start the updated daemon")
+    if status:
         return
     print("[mcp-stdio] daemon not up; starting…", file=sys.stderr)
     try:
@@ -294,7 +321,10 @@ def ensure_daemon() -> None:
         raise RuntimeError(f"failed to spawn DomA bridge daemon: {e}") from e
     deadline = time.time() + ENSURE_TIMEOUT_SEC
     while time.time() < deadline:
-        if _health_ok():
+        status = _health_status()
+        if status and (status.get("authRequired") is not True or status.get("version") != SERVER_VERSION):
+            raise RuntimeError("DomA bridge daemon is outdated; stop it and start the updated daemon")
+        if status:
             print("[mcp-stdio] daemon ready", file=sys.stderr)
             return
         time.sleep(0.2)
@@ -315,6 +345,7 @@ def call_start(args: dict[str, Any]) -> str:
         f"{CONTROL_BASE}/v1/conversations/start",
         {
             "task": args.get("task"),
+            "targetTabId": args.get("targetTabId"),
             "attachments": args.get("attachments"),
             "callerAgent": AGENT_NAME,
             "clientId": CLIENT_ID,
@@ -459,7 +490,18 @@ def handle_request(msg: dict[str, Any]) -> None:
                 {"ok": False, "text": str(e), "status": "error"},
                 ensure_ascii=False,
             )
-        _reply(req_id, {"content": [{"type": "text", "text": text}], "isError": False})
+        try:
+            outcome = json.loads(text)
+            if not isinstance(outcome, dict):
+                is_error = True
+            else:
+                status = outcome.get("status")
+                is_error = status == "error" or (
+                    outcome.get("ok") is False and status not in ("pending", "running")
+                )
+        except (TypeError, ValueError):
+            is_error = True
+        _reply(req_id, {"content": [{"type": "text", "text": text}], "isError": is_error})
         return
 
     _reply_error(req_id, -32601, f"Method not found: {method}")
@@ -478,8 +520,14 @@ def main() -> None:
 
     threading.Thread(target=_heartbeat_loop, name="doma-agent-hb", daemon=True).start()
 
-    for line in sys.stdin:
-        line = line.strip()
+    # MCP stdio is UTF-8 regardless of the Windows console code page. Reading
+    # sys.stdin as text can produce surrogateescape characters for Chinese input.
+    for raw_line in sys.stdin.buffer:
+        try:
+            line = raw_line.decode("utf-8", errors="strict").strip()
+        except UnicodeDecodeError as e:
+            print(f"invalid UTF-8 MCP request: {e}", file=sys.stderr)
+            continue
         if not line:
             continue
         try:
@@ -488,6 +536,12 @@ def main() -> None:
             print(f"invalid json: {e}", file=sys.stderr)
             continue
         if not isinstance(msg, dict):
+            continue
+        try:
+            json.dumps(msg, ensure_ascii=False).encode("utf-8", errors="strict")
+        except UnicodeEncodeError:
+            if msg.get("id") is not None:
+                _reply_error(msg["id"], -32602, "MCP request contains invalid Unicode")
             continue
         try:
             handle_request(msg)

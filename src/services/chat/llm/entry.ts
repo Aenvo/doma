@@ -1,4 +1,2 @@
-/**
- * 默认 re-export Pro；IDE 跳转以 tsconfig.edition.json 为准（sync:edition-ts）。
- */
+// Pro implementation. Open builds remap this module to entry.open.ts via tsconfig paths.
 export * from './entry.pro';

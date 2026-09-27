@@ -2,8 +2,6 @@
  * LLM 服务的通用类型定义
  */
 
-import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import type { ToolResult } from '@/services/mcp/mcpServer';
 export type LlmProvider =
   | 'gemini'
   | 'claude'
@@ -34,13 +32,16 @@ export interface LlmResponse {
 
 export interface LlmToolCallResult {
   tool_call_id: string;
-  result: ToolResult;
+  /** Normalized tool payload returned to the model (object, text, image/file descriptor, or error). */
+  result: unknown;
   name: string;
 }
 
 export interface ConversationMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: unknown;
+  /** OpenAI-compatible reasoning models require this to be echoed across tool rounds. */
+  reasoning_content?: string;
 }
 
 /** ChatPanel → llmManager 共用可选字段；身份头由 entry.pro 灌入 */
@@ -54,13 +55,25 @@ export interface LlmSendMessageOptions {
   skipAppendUserMessage?: boolean;
   onConversationStart: (conversationId: string) => void;
   onConversationDone: (conversationId: string, msgIds: string[]) => void;
+  /** 仅发布已确认不再调用工具的最终用户可见正文；工具轮次中的临时文本只保留在模型历史。 */
   onTextMessage: (conversationId: string, msgId: string, content: string) => void;
+  /** 仅当上游 API 实际返回 reasoning_content / reasoning 时触发。 */
+  onReasoningMessage?: (conversationId: string, msgId: string, content: string) => void;
   onToolCallStart: (conversationId: string, msgId: string, toolCall: any) => void;
-  onToolCallOverride: (conversationId: string, msgId: string, toolCall: any, toolResult: ToolResult) => Promise<ToolResult | undefined>;
+  onToolCallOverride: (
+    conversationId: string,
+    msgId: string,
+    toolCall: any,
+    toolResult: unknown,
+  ) => Promise<unknown | undefined>;
   onToolCallDone: (conversationId: string, msgId: string, toolCall: any) => void;
   onMessageStart: (conversationId: string, msgId: string) => void;
   onMessageDone: (conversationId: string, msgId: string) => void;
-  onMessageError: (conversationId: string, msgId: string, error: Error) => void;
+  onMessageError: (
+    conversationId: string,
+    msgId: string,
+    error: Error,
+  ) => void | Promise<void>;
   /**
    * 一轮 tool 结果写完 history 后调用。
    * 返回 true 则不再递归 call（用于上下文总结后截断）。
@@ -127,6 +140,7 @@ export const BROWSER_ASSISTANT_SYSTEM_PROMPT = `你是基于DomA模型的浏览�
 1. **先截图再行动（SoM 工作流）**：执行操作前，先用 browser_screenshot 截取当前标签页全屏。**必填** purpose（act|verify）与 goal。purpose=act 时 goal 写清要推进的结果；**涉及填写/输入/填表时必须传 values（推荐）或 text**。Jev 开启时：一次 act 会在工具内多步循环（刷新 SoM→选 click/type→代执行）直到完成或无法继续，返回 jev.steps；勿对已执行步骤再 click/type。Jev 关闭时：返回截图+elements，由你选 index。若返回 areas（A1/A2…），先 browser_screenshot_area。操作后可用 purpose=verify 确认 goal。若返回 blockingOverlay / instruction：目标层只在 [overlay] 内操作；关层优先层内 [dismiss]。**kind=suggest（输入建议 listbox）时：点与刚输入/values 最接近的 [overlay] option（aria-label），不要点 Select multiple 类开关，选对前不要关层**。**若 isError=true 或 message 为校验/错误文案：读懂 message，点确定/× 关闭后用新 goal 修正，禁止只关窗后重复原查询**。非模态弹层禁止为关窗去点外面链接。
 2. **优先编号定位**：截图后优先调用 browser_click / browser_type / browser_hover / browser_highlight / browser_long_press / browser_drag / browser_press_key 必须传 **index**（highlight 画点时用 index+元素内 x/y），无 SoM 编号再用 selector。
 3. **循序渐进**：复杂任务分步执行，每步操作后重新截图确认结果。
+4. **只读 DOM / 数据取证例外**：当任务主要是批量读取 DOM、枚举属性、搜索页面数据、逐屏触发懒加载或恢复滚动位置时，不要求每次滚动都截图。优先把确定性的读取、等待、滚动、采样与恢复合并为少量有界的 browser_execute_script 调用，并返回精简、可序列化的结构化 JSON；用 try/finally 恢复滚动位置。不得读取或输出 Cookie、Token、localStorage、sessionStorage 等敏感数据。只有确需视觉证据时再截图。
 
 # 中间数据 Store（browser_store_*）
 当工具结果过大、需跨多步复用、或分页采集合并时，用 session store 暂存。

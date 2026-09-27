@@ -6,6 +6,7 @@
  * - CLI 开关 → :3857
  * 回包按 requestId / conversationId 路由到来源 socket。
  */
+import mcpRelease from "../../../mcp-bridge/doma_mcp_release.json";
 
 /** MCP bridge WebSocket (paired with control :3846). */
 export const DOMA_MCP_BRIDGE_PORT = 3847;
@@ -31,6 +32,8 @@ export type McpBridgeTaskMessage = {
   type: "task";
   requestId: string;
   sendText: string;
+  targetTabId?: number;
+  targetUrl?: string;
   callerAgent?: string;
   attachments?: unknown[];
 };
@@ -59,16 +62,19 @@ export type McpBridgeInboundMessage =
   | McpBridgeCloseMessage;
 
 export type McpBridgeOutboundMessage =
-  | { type: "hello"; role: "extension"; version?: string }
+  | { type: "hello"; role: "extension"; version?: string; tabId?: number; title?: string; url?: string }
   | { type: "accepted"; requestId: string; conversationId: string }
   | { type: "running"; conversationId: string; text?: string }
   | {
       type: "result";
+      resultId?: string;
       conversationId?: string;
       requestId?: string;
       ok: boolean;
       text: string;
-      status: "done" | "error";
+      status: "done" | "error" | "needs_user_input";
+      sources?: string[];
+      artifacts?: Array<Record<string, string>>;
     };
 
 type InboundHandler = (msg: McpBridgeInboundMessage) => void | Promise<void>;
@@ -85,6 +91,81 @@ type BridgeSlot = {
 const KEEPALIVE_INTERVAL_MS = 20_000;
 
 let taskHandler: InboundHandler | null = null;
+let panelContext: { tabId?: number; title?: string; url?: string } = {};
+const pendingResults = new Map<string, {
+  message: Extract<McpBridgeOutboundMessage, { type: "result" }>;
+  createdAt: number;
+  port?: number;
+  resolve: (acknowledged: boolean) => void;
+  promise: Promise<boolean>;
+}>();
+let resultRetryTimer: ReturnType<typeof setInterval> | null = null;
+const RESULT_OUTBOX_KEY = "doma:mcp:result-outbox:v1";
+const RESULT_OUTBOX_TTL_MS = 30 * 60 * 1000;
+
+function saveResultOutbox(): void {
+  try {
+    localStorage.setItem(RESULT_OUTBOX_KEY, JSON.stringify([...pendingResults.values()].map(
+      ({ message, createdAt, port }) => ({ message, createdAt, port }),
+    )));
+  } catch (error) {
+    console.warn("[bridge] result outbox persistence failed", error);
+  }
+}
+
+function loadResultOutbox(): void {
+  try {
+    const records = JSON.parse(localStorage.getItem(RESULT_OUTBOX_KEY) || "[]");
+    if (!Array.isArray(records)) return;
+    for (const record of records) {
+      const message = record?.message;
+      const createdAt = Number(record?.createdAt);
+      if (message?.type !== "result" || typeof message.resultId !== "string" ||
+          !Number.isFinite(createdAt) || Date.now() - createdAt > RESULT_OUTBOX_TTL_MS ||
+          pendingResults.has(message.resultId)) continue;
+      const promise = Promise.resolve(true);
+      const port = typeof record?.port === "number" && slots.has(record.port)
+        ? record.port : DOMA_MCP_BRIDGE_PORT;
+      rememberRoute(port, message.requestId, message.conversationId);
+      pendingResults.set(message.resultId, { message, createdAt, port, resolve: () => {}, promise });
+    }
+    if (pendingResults.size && !resultRetryTimer) resultRetryTimer = setInterval(retryPendingResults, 3000);
+    saveResultOutbox();
+  } catch (error) {
+    console.warn("[bridge] result outbox reload failed", error);
+  }
+}
+
+function retryPendingResults(): void {
+  let expired = false;
+  for (const [id, entry] of pendingResults) {
+    if (Date.now() - entry.createdAt > RESULT_OUTBOX_TTL_MS) {
+      pendingResults.delete(id);
+      entry.resolve(false);
+      expired = true;
+      continue;
+    }
+    const socket = getSlot(entry.port ?? DOMA_MCP_BRIDGE_PORT)?.socket ?? null;
+    sendOn(socket, entry.message);
+  }
+  if (expired) saveResultOutbox();
+  if (!pendingResults.size && resultRetryTimer) {
+    clearInterval(resultRetryTimer);
+    resultRetryTimer = null;
+  }
+}
+
+function acknowledgeResult(resultId: string): void {
+  const entry = pendingResults.get(resultId);
+  if (!entry) return;
+  pendingResults.delete(resultId);
+  saveResultOutbox();
+  entry.resolve(true);
+  if (!pendingResults.size && resultRetryTimer) {
+    clearInterval(resultRetryTimer);
+    resultRetryTimer = null;
+  }
+}
 let stopped = false;
 /** Ports currently allowed to connect / reconnect (empty = none). */
 let enabledPorts = new Set<number>();
@@ -92,6 +173,15 @@ let enabledPorts = new Set<number>();
 /** requestId / conversationId → originating port (for reply routing). */
 const requestPort = new Map<string, number>();
 const conversationPort = new Map<string, number>();
+
+export function setMcpBridgePanelContext(context: { tabId?: number; title?: string; url?: string }): void {
+  panelContext = context;
+  slots.forEach((slot) => {
+    if (slot.socket?.readyState === WebSocket.OPEN) {
+      sendOn(slot.socket, { type: "hello", role: "extension", version: mcpRelease.version, ...panelContext });
+    }
+  });
+}
 
 const slots = new Map<number, BridgeSlot>(
   DOMA_BRIDGE_WS_PORTS.map((port) => [
@@ -174,14 +264,17 @@ function resolveReplySocket(opts: {
     if (slot?.socket && slot.socket.readyState === WebSocket.OPEN) {
       return slot.socket;
     }
+    return null;
   }
-  // Fallback: any open socket (should be rare)
+  // Unknown legacy route: only a single connected bridge is unambiguous.
+  let fallback: WebSocket | null = null;
   for (const slot of slots.values()) {
     if (slot.socket && slot.socket.readyState === WebSocket.OPEN) {
-      return slot.socket;
+      if (fallback) return null;
+      fallback = slot.socket;
     }
   }
-  return null;
+  return fallback;
 }
 
 function sendOn(ws: WebSocket | null, msg: McpBridgeOutboundMessage): boolean {
@@ -228,20 +321,51 @@ export function sendMcpBridgeResult(payload: {
   requestId?: string;
   ok: boolean;
   text: string;
-  status: "done" | "error";
-}): boolean {
+  status: "done" | "error" | "needs_user_input";
+  sources?: string[];
+  artifacts?: Array<Record<string, string>>;
+}): Promise<boolean> {
   const conversationId =
     typeof payload.conversationId === "string" ? payload.conversationId.trim() : "";
   const requestId = typeof payload.requestId === "string" ? payload.requestId.trim() : "";
-  if (!conversationId && !requestId) return false;
-  return sendOn(resolveReplySocket({ conversationId, requestId }), {
+  if (!conversationId && !requestId) return Promise.resolve(false);
+  const resultId = requestId || crypto.randomUUID();
+  const existing = pendingResults.get(resultId);
+  if (existing) return existing.promise;
+  let message: Extract<McpBridgeOutboundMessage, { type: "result" }> = {
     type: "result",
+    resultId,
     ...(conversationId ? { conversationId } : {}),
     ...(requestId ? { requestId } : {}),
     ok: payload.ok,
     text: payload.text,
     status: payload.status,
-  });
+    ...(payload.sources ? { sources: payload.sources } : {}),
+    ...(payload.artifacts ? { artifacts: payload.artifacts } : {}),
+  };
+  if (new TextEncoder().encode(JSON.stringify(message)).byteLength > 32 * 1024 * 1024) {
+    message = {
+      type: "result", resultId,
+      ...(conversationId ? { conversationId } : {}),
+      ...(requestId ? { requestId } : {}),
+      ok: false, status: "error",
+      text: "DomA 最终结果超过桥接协议的 32 MB 上限；请缩小输出或改为可引用文件",
+    };
+  }
+  const port = (requestId ? requestPort.get(requestId) : undefined) ??
+    (conversationId ? conversationPort.get(conversationId) : undefined) ??
+    DOMA_MCP_BRIDGE_PORT;
+  // The CLI bridge predates result acknowledgements; retain its existing send semantics.
+  if (port === DOMA_CLI_BRIDGE_PORT) {
+    return Promise.resolve(sendOn(getSlot(port)?.socket ?? null, message));
+  }
+  let resolve!: (acknowledged: boolean) => void;
+  const promise = new Promise<boolean>((done) => { resolve = done; });
+  pendingResults.set(resultId, { message, createdAt: Date.now(), port, resolve, promise });
+  saveResultOutbox();
+  retryPendingResults();
+  if (!resultRetryTimer) resultRetryTimer = setInterval(retryPendingResults, 3000);
+  return promise;
 }
 
 export function sendMcpBridgeAccepted(requestId: string, conversationId: string): boolean {
@@ -299,6 +423,7 @@ export function startMcpBridgeClient(
 ): void {
   taskHandler = onTask;
   stopped = false;
+  loadResultOutbox();
   const next = new Set(ports.filter((p) => slots.has(p)));
   enabledPorts = next;
 
@@ -340,6 +465,10 @@ export function stopMcpBridgeClient(options?: { clearHandler?: boolean }): void 
   }
   requestPort.clear();
   conversationPort.clear();
+  if (resultRetryTimer) clearInterval(resultRetryTimer);
+  resultRetryTimer = null;
+  for (const entry of pendingResults.values()) entry.resolve(false);
+  pendingResults.clear();
 }
 
 function attachLiveHandlers(slot: BridgeSlot, ws: WebSocket) {
@@ -350,6 +479,10 @@ function attachLiveHandlers(slot: BridgeSlot, ws: WebSocket) {
         const data = typeof ev.data === "string" ? ev.data : String(ev.data ?? "");
         const msg = JSON.parse(data) as Record<string, unknown>;
         if (msg?.type === "hello") return;
+        if (msg?.type === "result_ack" && typeof msg.resultId === "string") {
+          acknowledgeResult(msg.resultId);
+          return;
+        }
         if (msg?.type === "task") {
           const task = msg as unknown as McpBridgeTaskMessage;
           if (!task.requestId || !task.sendText) return;
@@ -436,7 +569,8 @@ function tryPort(port: number, generation: number): Promise<WebSocket | null> {
           JSON.stringify({
             type: "hello",
             role: "extension",
-            version: "0.6.0",
+            version: mcpRelease.version,
+            ...panelContext,
           }),
         );
       } catch {
@@ -497,6 +631,7 @@ async function connectPort(port: number): Promise<void> {
   slot.reconnectAttempt = 0;
   attachLiveHandlers(slot, ws);
   startKeepAlive(slot);
+  retryPendingResults();
   const label = port === DOMA_CLI_BRIDGE_PORT ? "cli" : "mcp";
   console.log(`[bridge] connected (${label})`, `ws://127.0.0.1:${port}`);
 }
