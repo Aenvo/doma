@@ -120,6 +120,25 @@ tool_timeout_sec = 120
 
 On Windows, use your installed Python command and an absolute Windows script path.
 
+## Conversation results
+
+After `browser_start_group_conversation` or `browser_send_conversation_message`, poll
+`browser_get_conversation_result` using the same `conversationId`. The response keeps
+the existing `ok`, `text`, `conversationId`, and `status` fields. It also includes the
+current `requestId`, target page title/URL when known, and `sources` and `artifacts`
+for user-visible result links or files. Large file bytes are never returned inline.
+
+`pending` and `running` mean work is still in progress. `done` is a persisted final
+answer; `needs_user_input` contains a question to ask the user, after which the agent
+can continue with `browser_send_conversation_message`. `error` is terminal. If more
+than one side panel qualifies, `ambiguous` includes candidate pages and requires the
+user to choose a `targetTabId` before retrying. The daemon turns a stalled task into
+an explicit error after 30 minutes by default (`DOMA_TASK_TIMEOUT_SEC`).
+
+The side panel collapses MCP turns by default and can expand the original messages.
+It sends terminal results until the daemon acknowledges them. After upgrading the
+bridge scripts, restart any older daemon and reload the unpacked extension.
+
 ## Manual daemon (optional)
 
 ```bash

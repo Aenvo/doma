@@ -63,6 +63,11 @@ class TabRoutingTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(len(self.first.sent), 2)
         self.assertEqual(self.second.sent, [])
+        self.assertIs(bridge._REQUEST_CLIENTS["request-4"], self.first)
+
+        closed = bridge.dispatch_close_to_doma("request-close", "conversation-3", "Codex")
+        self.assertTrue(closed["ok"])
+        self.assertIs(bridge._REQUEST_CLIENTS["request-close"], self.first)
 
     def test_reconnected_panel_can_receive_follow_up(self) -> None:
         with bridge._CLIENTS_LOCK:
