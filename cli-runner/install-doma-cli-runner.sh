@@ -21,12 +21,69 @@ USER_BIN="${DOMA_CLI_RUNNER_USER_BIN:-$HOME/bin}"
 LOCAL_BIN="${DOMA_CLI_RUNNER_BIN:-$HOME/.local/bin}"
 PATH_MARK="# DomA CLI Runner"
 
-have_python() {
-  if command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null
-    return $?
+is_windows() {
+  case "$(uname -s 2>/dev/null)" in
+    MSYS*|MINGW*|CYGWIN*|Windows_NT) return 0 ;;
+  esac
+  case "${OS:-}" in
+    Windows_NT) return 0 ;;
+  esac
+  return 1
+}
+
+python_ok() {
+  local bin="$1"
+  shift
+  "$bin" "$@" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null
+}
+
+PYTHON_BIN=""
+PYTHON_PREFIX_ARGS=()
+
+resolve_python() {
+  PYTHON_BIN=""
+  PYTHON_PREFIX_ARGS=()
+  local cand
+  for cand in python3 python; do
+    if command -v "$cand" >/dev/null 2>&1 && python_ok "$cand"; then
+      PYTHON_BIN="$(command -v "$cand")"
+      return 0
+    fi
+  done
+  if command -v py >/dev/null 2>&1 && python_ok py -3; then
+    PYTHON_BIN="$(command -v py)"
+    PYTHON_PREFIX_ARGS=(-3)
+    return 0
+  fi
+  if is_windows; then
+    local exe
+    for exe in \
+      "${LOCALAPPDATA:-}/Programs/Python/"*/python.exe \
+      "/c/Windows/py.exe" \
+      "/c/Windows/System32/py.exe"; do
+      [[ -e "$exe" ]] || continue
+      case "$exe" in
+        */py.exe)
+          if python_ok "$exe" -3; then
+            PYTHON_BIN="$exe"
+            PYTHON_PREFIX_ARGS=(-3)
+            return 0
+          fi
+          ;;
+        *)
+          if python_ok "$exe"; then
+            PYTHON_BIN="$exe"
+            return 0
+          fi
+          ;;
+      esac
+    done
   fi
   return 1
+}
+
+have_python() {
+  resolve_python
 }
 
 install_python_macos() {
@@ -68,6 +125,11 @@ install_python_linux() {
 ensure_python() {
   if have_python; then
     return 0
+  fi
+  if is_windows; then
+    echo "[DomA CLI Runner] ERROR: Python 3.9+ not on PATH in this shell ($(uname -s))." >&2
+    echo "[DomA CLI Runner] Try: python -V   or   py -3 -V   then re-run." >&2
+    exit 1
   fi
   case "$(uname -s)" in
     Darwin) install_python_macos ;;
@@ -127,7 +189,7 @@ install_launcher() {
   cat > "$wrapper" <<EOF
 #!/usr/bin/env bash
 ${wrapper_extra}
-exec "$PY" "$py_abs" "\$@"
+exec "$PY" ${PYTHON_PREFIX_ARGS[*]} "$py_abs" "\$@"
 EOF
   chmod 755 "$wrapper"
   install -m 755 "$wrapper" "$dest_dir/$launcher_name"
@@ -141,9 +203,9 @@ trap 'rm -rf "$TMP"' EXIT
 download "$RUNNER_PY_URL" "$TMP/doma_cli_runner.py"
 download "$DOMA_PY_URL" "$TMP/doma.py"
 download "$DAEMON_PY_URL" "$TMP/doma_cli_bridge_daemon.py"
-python3 -m py_compile "$TMP/doma_cli_runner.py"
-python3 -m py_compile "$TMP/doma.py"
-python3 -m py_compile "$TMP/doma_cli_bridge_daemon.py"
+"$PYTHON_BIN" "${PYTHON_PREFIX_ARGS[@]}" -m py_compile "$TMP/doma_cli_runner.py"
+"$PYTHON_BIN" "${PYTHON_PREFIX_ARGS[@]}" -m py_compile "$TMP/doma.py"
+"$PYTHON_BIN" "${PYTHON_PREFIX_ARGS[@]}" -m py_compile "$TMP/doma_cli_bridge_daemon.py"
 install -m 755 "$TMP/doma_cli_runner.py" "$INSTALL_DIR/doma_cli_runner.py"
 install -m 755 "$TMP/doma.py" "$INSTALL_DIR/doma.py"
 install -m 755 "$TMP/doma_cli_bridge_daemon.py" "$INSTALL_DIR/doma_cli_bridge_daemon.py"
@@ -152,7 +214,7 @@ INSTALL_ABS="$(cd "$INSTALL_DIR" && pwd)"
 RUNNER_PY_ABS="$INSTALL_ABS/doma_cli_runner.py"
 DOMA_PY_ABS="$INSTALL_ABS/doma.py"
 DAEMON_PY_ABS="$INSTALL_ABS/doma_cli_bridge_daemon.py"
-PY="$(command -v python3)"
+PY="$PYTHON_BIN"
 
 # 1) Always install into ~/bin (no root)
 # Runner owns bridge lifecycle; point it at installed daemon script.

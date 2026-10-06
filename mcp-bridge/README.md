@@ -20,6 +20,8 @@ curl -fsSL https://res.stayfork.app/d/install-doma-mcp.sh | bash
 
 Installs into `~/.doma/mcp/` and prints MCP JSON to paste into Cursor / other agents.
 
+On **Windows**, run the same command in Git Bash. The installer looks for `python3`, `python`, or `py -3` (Windows Python often does not provide `python3`). Restart Git Bash after installing Python so PATH is picked up.
+
 Upload these three files to `https://res.stayfork.app/d/`:
 
 - `install-doma-mcp.sh`
@@ -34,6 +36,8 @@ Upload these three files to `https://res.stayfork.app/d/`:
 | `3847` | Extension WebSocket (fixed) |
 
 ## Cursor / other agents
+
+The installer prints a ready-to-paste JSON block. On Windows the `command` is often `python.exe` or `py.exe` with `args` like `["-3", "C:\\Users\\...\\doma_mcp_stdio.py"]` (native paths). On macOS / Linux it looks like:
 
 ```json
 {
