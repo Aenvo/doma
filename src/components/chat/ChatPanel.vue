@@ -1,26 +1,15 @@
 <template>
-  <div class="chat-panel" :class="{ 'chat-panel--safari-shell': IS_SAFARI_EXT }">
-    <div v-if="IS_SAFARI_EXT" class="safari-shell-header">
-      <div class="safari-shell-brand">
-        <span class="safari-shell-icon doma-icon" aria-hidden="true" :style="domaIconMaskStyle" />
-        <span class="safari-shell-title">{{ safariShellTitle }}</span>
-      </div>
-      <button
-        type="button"
-        class="safari-panel-close-btn"
-        title="Close"
-        aria-label="Close"
-        @click="closeSafariSidePanel"
-      >
-        <svg class="safari-panel-close-icon" viewBox="0 0 12 12" width="18" height="18" aria-hidden="true">
-          <path
-            fill="currentColor"
-            d="M2.1 2.1a.75.75 0 0 1 1.06 0L6 4.94l2.84-2.84a.75.75 0 1 1 1.06 1.06L7.06 6l2.84 2.84a.75.75 0 1 1-1.06 1.06L6 7.06 3.16 9.9a.75.75 0 1 1-1.06-1.06L4.94 6 2.1 3.16a.75.75 0 0 1 0-1.06z"
-          />
-        </svg>
-      </button>
-    </div>
-    <header class="chat-header">
+  <div
+    class="chat-panel"
+    :class="{
+      'chat-panel--safari-shell': IS_SAFARI_EXT,
+      'chat-panel--phone': IS_PHONE_CHAT,
+    }"
+  >
+    <header
+      class="chat-header"
+      :class="{ 'chat-header--phone': IS_PHONE_CHAT }"
+    >
       <div class="chat-title-row">
         <div class="chat-header-lead">
           <ChatPanelSlots position="lead" />
@@ -28,7 +17,13 @@
         <h1 class="chat-title" aria-label="DomA">
           <span class="doma-icon" aria-hidden="true" :style="domaIconMaskStyle" />
         </h1>
-        <div class="chat-header-actions" role="toolbar" aria-label="DomA">
+        <div
+          class="chat-header-actions"
+          role="toolbar"
+          aria-label="DomA"
+          @click.capture="onPhoneHeaderActionsCapture"
+          @pointerup.capture="onPhoneHeaderActionsCapture"
+        >
           <button
             class="new-chat-btn header-action-btn"
             data-onboarding="newChat"
@@ -37,7 +32,9 @@
           >
             <ChatNewSvg />
           </button>
+          <!-- Safari 全平台（iPhone / iPad / Mac）：header 只保留 新对话 / 历史 / 下载 / 临时数据 -->
           <button
+            v-if="!IS_SAFARI_EXT"
             class="group-session-btn header-action-btn"
             data-onboarding="groupSession"
             @click="startGroupSession"
@@ -55,6 +52,7 @@
             <ChatHistorySvg />
           </button>
           <button
+            v-if="!IS_SAFARI_EXT"
             class="scheduled-btn header-action-btn"
             data-onboarding="scheduled"
             @click="toggleScheduledPanel"
@@ -74,6 +72,7 @@
             <DbPlusSvg class="dbplus-icon" aria-hidden="true" />
           </button>
           <button
+            v-if="!IS_SAFARI_EXT"
             type="button"
             class="mcp-btn header-action-btn"
             data-onboarding="connector"
@@ -89,6 +88,27 @@
             >{{ mcpAgentCount > 9 ? "9+" : mcpAgentCount }}</span>
           </button>
         </div>
+        <button
+          v-if="IS_PHONE_CHAT"
+          type="button"
+          class="phone-view-toggle-btn"
+          :class="phoneComposerVisible ? 'phone-view-toggle-btn--composer' : 'phone-view-toggle-btn--chat'"
+          :title="phoneComposerVisible ? t('chat.phoneLayout.showConversation') : t('chat.phoneLayout.showComposer')"
+          :aria-label="phoneComposerVisible ? t('chat.phoneLayout.showConversation') : t('chat.phoneLayout.showComposer')"
+          @click="onPhoneViewToggleClick"
+        >
+          <!-- 双槽开关：滑块 + 当前侧放大，一眼能看出可切换 -->
+          <span class="phone-view-toggle-track" aria-hidden="true">
+            <span class="phone-view-toggle-thumb" />
+            <span class="phone-view-toggle-slot phone-view-toggle-slot--bubble">
+              <ChatBubbleSvg />
+            </span>
+            <span class="phone-view-toggle-slot phone-view-toggle-slot--cursor">
+              <ChatTextCursorSvg />
+            </span>
+          </span>
+        </button>
+        <ChatPanelSlots position="header-trailing" />
       </div>
 
       <ChatPanelSlots position="downloader-panel" />
@@ -343,6 +363,7 @@
     </header>
     
     <div
+      v-show="!IS_PHONE_CHAT || !phoneComposerVisible"
       class="chat-messages-area"
       :class="{ 'chat-messages-area--skill-drop': skillFileDropActive }"
       @dragenter.prevent="onMessagesAreaDragEnter"
@@ -365,7 +386,15 @@
         v-if="showQuickMessages"
         @send="onQuickMessageSend"
       />
-      <div class="chat-messages" ref="messagesEl" @click="onChatMessagesClick" @copy="onChatMessagesCopy" @scroll="scheduleUserBubbleMinimapLayout">
+      <div
+        class="chat-messages"
+        ref="messagesEl"
+        @click="onChatMessagesClick"
+        @copy="onChatMessagesCopy"
+        @scroll="scheduleUserBubbleMinimapLayout"
+        @touchstart.passive="onPhoneMessagesTouchStart"
+        @touchmove.passive="onPhoneMessagesTouchMove"
+      >
         <!-- 普通消息 -->
         <template v-for="(item, dIdx) in displayMessages" :key="`${item.type}-${item.id}-${dIdx}`">
           <div
@@ -718,7 +747,12 @@
       </div>
     </div>
 
-    <div class="chat-input-row">
+    <div
+      v-show="!IS_PHONE_CHAT || phoneComposerVisible"
+      class="chat-input-row"
+      @focusin="onPhoneComposerFocusIn"
+      @focusout="onPhoneComposerFocusOut"
+    >
       <div class="composer-modal-anchor">
       <div class="composer-stack">
         <!-- 顶部 host + 会话选择（贴住输入框上沿） -->
@@ -728,8 +762,10 @@
           @remove="onEnqueueRemove"
         />
         <ConversationPicker
+          ref="conversationPickerRef"
           :options="conversationPickerOptions"
           :loading="loading"
+          :hide-collapsed-summary="IS_PHONE_CHAT"
           @change="onConversationSelectChange"
           @close="onConversationPickerClose"
         />
@@ -1003,17 +1039,22 @@ import ChatRetrySvg from "@/assets/images/chat-retry.svg";
 import ChatCheckmarkSvg from "@/assets/images/chat-checkmark.svg";
 import ChatExpandRightSvg from "@/assets/images/chat-expand-right.svg";
 import ChatExpandDownSvg from "@/assets/images/chat-expand-down.svg";
+import ChatBubbleSvg from "@/assets/images/chat-bubble.svg";
+import ChatTextCursorSvg from "@/assets/images/chat-text-cursor.svg";
 import domaIconMaskUrl from "@/assets/images/doma-icon.svg?url";
 import DbPlusSvg from "@/assets/images/db-plus.svg";
 import McpLinkSvg from "@/assets/images/mcp-link.svg";
 import ConnectorPanel from "@/components/chat/ConnectorPanel.vue";
-import { getLocalizedString } from "@/services/extensionService";
 import { isHttpError } from "@/services/chat/sseFetcher";
 const domaIconMaskStyle = {
   maskImage: `url("${domaIconMaskUrl}")`,
   WebkitMaskImage: `url("${domaIconMaskUrl}")`,
 };
-import { awaitConversationContextPersistenceReady, reloadConversationContextsFromDisk } from "@/services/chat/conversationContextPersistence";
+import {
+  awaitConversationContextPersistenceReady,
+  reloadConversationContextsFromDisk,
+  CONVERSATION_CONTEXT_STORAGE_KEY,
+} from "@/services/chat/conversationContextPersistence";
 import {
   enqueueMessage,
   shiftEnqueueForConversation,
@@ -1021,7 +1062,8 @@ import {
 } from "@/services/chat/enqueueStore";
 import { 
   getConversationIdByTabId, 
-  upsertConversationContext, 
+  upsertConversationContext,
+  awaitConversationContextPersist,
   pruneInvalidConversationContexts, 
   listConversationContexts,
   replaceConversationMapsFromPersisted,
@@ -1065,7 +1107,6 @@ import {
 import {
   initActiveBrowserTabTracking,
   isSafariSidePanelShell,
-  requestCloseSidePanelShell,
   resolveActiveBrowserTab,
 } from "@/edition/activeBrowserTab";
 import {
@@ -1074,9 +1115,38 @@ import {
   safariShellOnTurnDone,
   safariShellOnUserSend,
 } from "@/edition/safariShellChat";
+import { isPhoneChatLayout } from "@/utils/device";
 
 /** Safari 页内壳：禁 tabs/windows；宿主 tab 由 edition(pro) + panelShell 注入 */
 const IS_SAFARI_EXT = isSafariSidePanelShell();
+
+/** 手机侧栏布局（iPhone / Android 手机；开源语义，非 Safari 特例） */
+const IS_PHONE_CHAT = isPhoneChatLayout();
+
+/** Safari iPhone 底栏 sheet：仅用于向 panelShell 同步高度 */
+function detectIphoneSheetShell(): boolean {
+  if (!IS_SAFARI_EXT) return false;
+  try {
+    const layout = new URLSearchParams(location.search).get("shellLayout");
+    if (layout === "iphone-sheet") return true;
+    if (layout === "side") return false;
+  } catch {
+    // ignore
+  }
+  const ua = navigator.userAgent || "";
+  return /iPhone|iPod/i.test(ua);
+}
+const IS_IPHONE_SHEET = detectIphoneSheetShell();
+
+/** 手机：true=输入框视图；false=对话内容视图 */
+const phoneComposerVisible = ref(true);
+
+type ConversationPickerExpose = {
+  expand: () => void;
+  collapse: () => void;
+  toggleExpand: () => void;
+};
+const conversationPickerRef = ref<ConversationPickerExpose | null>(null);
 
 if (IS_SAFARI_EXT) {
   initActiveBrowserTabTracking((tab) => {
@@ -1084,12 +1154,213 @@ if (IS_SAFARI_EXT) {
   });
 }
 
-function closeSafariSidePanel() {
-  void requestCloseSidePanelShell();
+/** 手机 sheet 紧凑高度（输入模式 / 对话未手动滑高时） */
+let phoneSheetCompactHeightPx = 0;
+/** 对话模式手动滑动后升到半屏 */
+let phoneSheetChatExpanded = false;
+const PHONE_SHEET_CHAT_RATIO = 0.5;
+let phoneMessagesTouchStartY = 0;
+let phoneMessagesTouchStartScrollTop = 0;
+/** 本次触摸开始时是否已是半屏（避免刚升高又被同一次下拉收回） */
+let phoneSheetWasExpandedAtTouchStart = false;
+
+function postSheetHeightToShell(payload: {
+  heightPx?: number;
+  ratio?: number;
+  persist?: boolean;
+}) {
+  if (!IS_IPHONE_SHEET) return;
+  try {
+    window.parent?.postMessage(
+      {
+        source: "doma-sidepanel",
+        operate: "safariPanel/setSheetHeight",
+        heightPx: payload.heightPx,
+        ratio: payload.ratio,
+        persist: payload.persist === true,
+      },
+      "*",
+    );
+  } catch (e) {
+    console.warn("[ChatPanel] setSheetHeight postMessage failed", e);
+  }
 }
 
-const safariShellTitle =
-  getLocalizedString("extension_name") || "DomA - Conversation is action, Your browser agent";
+/** 量 header+输入区高度并缓存；输入已隐藏时用缓存，避免 v-show 量到 0 */
+function measurePhoneCompactSheetHeightPx(): number {
+  const header = document.querySelector(".chat-header") as HTMLElement | null;
+  const input = document.querySelector(".chat-input-row") as HTMLElement | null;
+  const headerH = header?.getBoundingClientRect().height || 0;
+  const inputH = input?.getBoundingClientRect().height || 0;
+  if (inputH >= 40) {
+    phoneSheetCompactHeightPx = Math.max(140, Math.round(headerH + inputH) + 8);
+  } else if (phoneSheetCompactHeightPx <= 0 && headerH > 0) {
+    // 尚无缓存时的兜底（约一屏输入条）
+    phoneSheetCompactHeightPx = Math.max(140, Math.round(headerH + 160));
+  }
+  return phoneSheetCompactHeightPx || 200;
+}
+
+/** Safari 手机 sheet：紧凑高，或对话手动滑高后的半屏 */
+function syncPhoneSheetHeight() {
+  if (!IS_IPHONE_SHEET) return;
+  void nextTick(() => {
+    if (!phoneComposerVisible.value && phoneSheetChatExpanded) {
+      postSheetHeightToShell({ ratio: PHONE_SHEET_CHAT_RATIO, persist: false });
+      return;
+    }
+    const h = measurePhoneCompactSheetHeightPx();
+    postSheetHeightToShell({ heightPx: h, persist: false });
+  });
+}
+
+/** 仅手动触摸滑动升高；自动 scrollTop 不走这里 */
+function expandPhoneSheetForChatScroll() {
+  if (!IS_PHONE_CHAT || phoneComposerVisible.value) return;
+  if (phoneSheetChatExpanded) return;
+  phoneSheetChatExpanded = true;
+  if (IS_IPHONE_SHEET) {
+    postSheetHeightToShell({ ratio: PHONE_SHEET_CHAT_RATIO, persist: false });
+  }
+}
+
+function collapsePhoneSheetFromChatOverscroll() {
+  if (!IS_PHONE_CHAT || phoneComposerVisible.value) return;
+  if (!phoneSheetChatExpanded) return;
+  phoneSheetChatExpanded = false;
+  syncPhoneSheetHeight();
+}
+
+function onPhoneMessagesTouchStart(ev: TouchEvent) {
+  if (!IS_PHONE_CHAT || phoneComposerVisible.value) return;
+  phoneMessagesTouchStartY = ev.touches[0]?.clientY ?? 0;
+  const box = (ev.currentTarget as HTMLElement | null) || messagesEl.value;
+  phoneMessagesTouchStartScrollTop = box?.scrollTop ?? 0;
+  phoneSheetWasExpandedAtTouchStart = phoneSheetChatExpanded;
+}
+
+function onPhoneMessagesTouchMove(ev: TouchEvent) {
+  if (!IS_PHONE_CHAT || phoneComposerVisible.value) return;
+  const y = ev.touches[0]?.clientY ?? 0;
+  const dy = y - phoneMessagesTouchStartY; // >0 手指下移
+  const box = (ev.currentTarget as HTMLElement | null) || messagesEl.value;
+  const top = box?.scrollTop ?? 0;
+
+  if (!phoneSheetChatExpanded) {
+    // 仅触摸手势升高；@scroll / 自动滚到底不触发
+    if (Math.abs(dy) > 14) expandPhoneSheetForChatScroll();
+    return;
+  }
+  // 触摸开始时已是半屏，且已在对话顶，继续下拉 → 收回紧凑高
+  if (
+    phoneSheetWasExpandedAtTouchStart &&
+    top <= 1 &&
+    phoneMessagesTouchStartScrollTop <= 1 &&
+    dy > 40
+  ) {
+    collapsePhoneSheetFromChatOverscroll();
+  }
+}
+
+/** 手机模式：通知宿主页（Safari sheet 等）盖/撤上半页点击挡板 */
+function postPhoneComposerActiveToShell(active: boolean) {
+  if (!IS_PHONE_CHAT) return;
+  try {
+    window.parent?.postMessage(
+      {
+        source: "doma-sidepanel",
+        operate: "safariPanel/composerActive",
+        active: !!active,
+      },
+      "*",
+    );
+  } catch {
+    // ignore
+  }
+}
+
+function blurPhoneComposerInput() {
+  try {
+    const ae = document.activeElement as HTMLElement | null;
+    if (ae && typeof ae.blur === "function") ae.blur();
+  } catch {
+    // ignore
+  }
+  postPhoneComposerActiveToShell(false);
+}
+
+function onPhoneComposerFocusIn() {
+  if (!IS_PHONE_CHAT || !phoneComposerVisible.value) return;
+  postPhoneComposerActiveToShell(true);
+}
+
+function onPhoneComposerFocusOut(ev: FocusEvent) {
+  if (!IS_PHONE_CHAT) return;
+  const row = ev.currentTarget as HTMLElement | null;
+  const next = ev.relatedTarget as Node | null;
+  if (row && next && row.contains(next)) return;
+  window.requestAnimationFrame(() => {
+    if (row && row.contains(document.activeElement)) return;
+    postPhoneComposerActiveToShell(false);
+  });
+}
+
+function onPhoneShellBlurComposerMessage(ev: MessageEvent) {
+  if (!IS_PHONE_CHAT) return;
+  const data = ev?.data;
+  if (!data || data.source !== "doma-panel-shell") return;
+  if (data.operate !== "safariPanel/blurComposer") return;
+  blurPhoneComposerInput();
+}
+
+function setPhoneComposerVisible(visible: boolean) {
+  if (!IS_PHONE_CHAT) return;
+  // 切到对话前先量输入高度，否则下一帧 input 已隐藏
+  if (!visible && phoneComposerVisible.value) {
+    measurePhoneCompactSheetHeightPx();
+  }
+  phoneComposerVisible.value = visible;
+  // 每次进对话从紧凑高开始；手动滑再升高。回输入则收回半屏。
+  phoneSheetChatExpanded = false;
+  phoneMessagesTouchStartScrollTop = 0;
+  if (!visible) {
+    conversationPickerRef.value?.collapse?.();
+    blurPhoneComposerInput();
+  }
+  syncPhoneSheetHeight();
+}
+
+function togglePhoneComposerView() {
+  setPhoneComposerVisible(!phoneComposerVisible.value);
+}
+
+/** 手机：点完立刻清掉粘滞 :hover（iOS 上 blur 不够，需短暂关掉 pointer-events） */
+function clearPhoneStickyHover(el: HTMLElement | null) {
+  if (!el) return;
+  try {
+    el.blur();
+  } catch {
+    // ignore
+  }
+  const prev = el.style.pointerEvents;
+  el.style.pointerEvents = "none";
+  window.requestAnimationFrame(() => {
+    el.style.pointerEvents = prev;
+  });
+}
+
+function onPhoneViewToggleClick(ev: MouseEvent) {
+  togglePhoneComposerView();
+  clearPhoneStickyHover(ev.currentTarget as HTMLElement | null);
+}
+
+function onPhoneHeaderActionsCapture(ev: Event) {
+  if (!IS_PHONE_CHAT) return;
+  const btn = (ev.target as Element | null)?.closest?.("button") as HTMLElement | null;
+  if (!btn) return;
+  // 历史 / 下载 / 临时数据等：收起后清掉粘滞高亮
+  window.requestAnimationFrame(() => clearPhoneStickyHover(btn));
+}
 
 
 const { t, locale } = useI18n();
@@ -2573,17 +2844,40 @@ async function runTabHandoverIfNeeded(tab: {
   id: number;
   url: string;
   via?: string;
+  /** SW/工具侧显式要求续跑（Safari 新面板看不到 opener loading） */
+  resume?: boolean;
 }): Promise<void> {
+  // Safari 新 tab 侧栏常在 delayed loadBoundConversation 之前就收到 handover；
+  // 内存 map 仍空，必须先从 storage.local 灌 Context，否则 get*ByTabId 静默 miss。
+  try {
+    await awaitConversationContextPersistenceReady(replaceConversationMapsFromPersisted);
+  } catch (e) {
+    console.warn("[DOMA_HANDOVER] runTabHandover hydrate context failed", e);
+  }
+
   const openerConversationId = await getConversationIdByTabId(tab.sourceTabId);
   if (!openerConversationId) {
+    console.warn("[DOMA_HANDOVER] runTabHandover skip: no openerConversationId", {
+      sourceTabId: tab.sourceTabId,
+      newTabId: tab.id,
+      via: tab.via,
+    });
     return;
   }
   const openerConversation = getConversationContext(openerConversationId);
   if (!openerConversation) {
+    console.warn("[DOMA_HANDOVER] runTabHandover skip: no openerConversation", {
+      sourceTabId: tab.sourceTabId,
+      openerConversationId,
+      newTabId: tab.id,
+      via: tab.via,
+    });
     return;
   }
 
   const openerIsLoading = isConversationLoading(openerConversationId);
+  // resume：工具 navigate 跨面板；openerIsLoading：同面板 webNavigation / Chrome
+  const shouldResume = tab.resume === true || openerIsLoading;
   if (openerIsLoading) {
     abortControllersByConversation.get(openerConversationId)?.abort();
   }
@@ -2613,6 +2907,8 @@ async function runTabHandoverIfNeeded(tab: {
       toCid: newConversationId,
       clearedMsgCount: clearedN,
       openerWasLoading: openerIsLoading,
+      resumeFromPayload: tab.resume === true,
+      shouldResume,
     });
 
     refreshConversationContextList();
@@ -2627,7 +2923,7 @@ async function runTabHandoverIfNeeded(tab: {
     const rootLink = callChain[0];
     const parentLink = taskDepth > 0 ? callChain[taskDepth - 1] : undefined;
 
-    if (openerIsLoading) {
+    if (shouldResume) {
       send2(`<interactionBlock>
 # 最优先使用以下上下文
 ## 跨标签页协作（来源页 tab ${tab.sourceTabId} → 当前子页）
@@ -2780,6 +3076,10 @@ let sidePanelRuntimeOnMessageListener: ((message: any, sender: any, sendResponse
   null;
 /** Safari panelShell → iframe 中转（open 侧栏无此路径，监听无害） */
 let sidePanelShellRelayListener: ((event: MessageEvent) => void) | null = null;
+/** storage.local 里 ConversationContext 变更（跨 Safari iframe / SW） */
+let conversationContextStorageListener:
+  | ((changes: Record<string, { newValue?: unknown; oldValue?: unknown }>, area: string) => void)
+  | null = null;
 
 
 // 历史会话相关
@@ -4419,7 +4719,17 @@ async function abortTask() {
 }
 
 onMounted(async () => {
-  console.log("[ChatPanel] mount-2 begin", { safari: IS_SAFARI_EXT });
+  console.log("[ChatPanel] mount-2 begin", { safari: IS_SAFARI_EXT, phone: IS_PHONE_CHAT });
+  if (IS_PHONE_CHAT) {
+    // 默认输入视图；Safari sheet 高度贴合 header+composer
+    phoneComposerVisible.value = true;
+    syncPhoneSheetHeight();
+    window.setTimeout(() => syncPhoneSheetHeight(), 120);
+    window.setTimeout(() => syncPhoneSheetHeight(), 400);
+  }
+  if (IS_PHONE_CHAT) {
+    window.addEventListener("message", onPhoneShellBlurComposerMessage);
+  }
   if (IS_SAFARI_EXT) {
     console.warn("[PANEL-RELOAD][iframe] ChatPanel mount-2", {
       href: String(location.href || "").slice(0, 160),
@@ -4724,14 +5034,38 @@ async function dispatchSidePanelRuntimeMessage(message: any): Promise<unknown> {
       return { ok: false, error: String(e) };
     }
   }
+  if (origin === "background" && operate === "chat/abortForHandover") {
+    const cid =
+      typeof message.conversationId === "string" ? message.conversationId.trim() : "";
+    console.log("[DOMA_HANDOVER]", "dispatch:abortForHandover", {
+      cid: cid || null,
+      sourceTabId: message.sourceTabId,
+      panelCid: conversationId.value,
+    });
+    if (cid) {
+      abortControllersByConversation.get(cid)?.abort();
+      abortControllersByConversation.delete(cid);
+      // Safari opener：停流后回到本 tab 绑定的会话（勿继续刷子页 conversation）
+      if (conversationId.value === cid) {
+        try {
+          await loadBoundConversation();
+        } catch (e) {
+          console.warn("[DOMA_HANDOVER] abortForHandover loadBound failed", e);
+        }
+      }
+    }
+    return { ok: true };
+  }
   if (origin === "background" && operate === "chat/runTabHandover") {
     const sourceTabId = message.sourceTabId;
     const newTabId = message.newTabId;
     const url = message.url;
+    const resume = message.resume === true;
     console.log("[DOMA_HANDOVER]", "dispatch:runTabHandover", {
       sourceTabId,
       newTabId,
       url,
+      resume,
       panelCid: conversationId.value,
       argOk:
         typeof sourceTabId === "number"
@@ -4744,6 +5078,7 @@ async function dispatchSidePanelRuntimeMessage(message: any): Promise<unknown> {
         id: newTabId,
         url,
         via: "runtime-message",
+        resume,
       });
     } else {
       console.warn("[DOMA_HANDOVER]", "dispatch:runTabHandover:bad-args", {
@@ -4851,6 +5186,7 @@ function addListener() {
       message?.origin === "background"
       && (message?.operate === "chat/getTabIdByConversationId"
         || message?.operate === "chat/planQuestionsShow"
+        || message?.operate === "chat/abortForHandover"
         || message?.operate === "chat/runTabHandover"
         || message?.operate === "chat/runConversationHandover"
         || message?.operate === "chat/refreshConversations"
@@ -4918,6 +5254,32 @@ function addListener() {
     })();
   };
   window.addEventListener("message", sidePanelShellRelayListener);
+
+  // ConversationContext 在 storage.local：其它 tab 侧栏 / SW 写入后刷新本实例列表
+  if (conversationContextStorageListener) {
+    try {
+      browser.storage.onChanged.removeListener(conversationContextStorageListener);
+    } catch {
+      // ignore
+    }
+  }
+  conversationContextStorageListener = (changes, area) => {
+    if (area !== "local") return;
+    if (!changes?.[CONVERSATION_CONTEXT_STORAGE_KEY]) return;
+    void (async () => {
+      try {
+        await reloadConversationContextsFromDisk(replaceConversationMapsFromPersisted);
+        await refreshConversationContextList();
+      } catch (e) {
+        console.warn("[ChatPanel] conversation context storage sync failed", e);
+      }
+    })();
+  };
+  try {
+    browser.storage.onChanged.addListener(conversationContextStorageListener);
+  } catch (e) {
+    console.warn("[ChatPanel] storage.onChanged listen failed", e);
+  }
 }
 
 function addTabListeners() {
@@ -5194,6 +5556,14 @@ function removeTabListeners() {
 }
 
 onUnmounted(() => {
+  if (IS_PHONE_CHAT) {
+    try {
+      window.removeEventListener("message", onPhoneShellBlurComposerMessage);
+    } catch {
+      // ignore
+    }
+    postPhoneComposerActiveToShell(false);
+  }
   clearMcpAgentBadge();
   stopMcpBridgeClient();
   registerChatPanelSlotsHost(null);
@@ -5230,6 +5600,14 @@ onUnmounted(() => {
       // ignore
     }
     sidePanelShellRelayListener = null;
+  }
+  if (conversationContextStorageListener) {
+    try {
+      getContext().browser.storage.onChanged.removeListener(conversationContextStorageListener);
+    } catch {
+      // ignore
+    }
+    conversationContextStorageListener = null;
   }
   removeTabListeners();
   if (isTabRecording.value || isTabRecordingActive()) {
@@ -5471,6 +5849,9 @@ async function loadConversation(convId: string | undefined, reason = "unknown") 
 
 async function startNewConversation() {
   if (!conversationId.value) return;
+  if (IS_PHONE_CHAT) {
+    setPhoneComposerVisible(true);
+  }
   messages.value = [];
   const conversation = getConversationContext(conversationId.value);
   if (conversation && conversation.mode === "group") {
@@ -6431,15 +6812,40 @@ async function resolveCurrentConversationHost(): Promise<string> {
 
 async function createSingleConversation(conversationId: string, question: string) {
   const currentTab = await resolveActiveBrowserTabLite();
+  const tabId =
+    typeof currentTab?.id === "number" && Number.isFinite(currentTab.id)
+      ? currentTab.id
+      : undefined;
+  console.log("[Chat] createSingleConversation", {
+    conversationId,
+    hasCurrentTab: !!currentTab,
+    tabId: tabId ?? null,
+    url: typeof currentTab?.url === "string" ? currentTab.url.slice(0, 120) : null,
+    title: typeof currentTab?.title === "string" ? currentTab.title.slice(0, 80) : null,
+    willWriteTabId: tabId != null,
+    hrefHostTabId: (() => {
+      try {
+        return new URLSearchParams(location.search).get("hostTabId");
+      } catch {
+        return null;
+      }
+    })(),
+  });
   upsertConversationContext({
     conversationId,
     lastUserQuestion: question,
-    ...(typeof currentTab?.id === "number" ? { tabId: currentTab.id } : {}),
+    ...(tabId != null ? { tabId } : {}),
     mode: "single",
     tabInfo: {
       url: typeof currentTab?.url === "string" ? currentTab.url : undefined,
       icon: typeof currentTab?.favIconUrl === "string" ? currentTab.favIconUrl : undefined,
     },
+  });
+  // 等 IDB 落盘完成，避免 SW 工具立刻 getTabIdFromDisk miss
+  await awaitConversationContextPersist(conversationId);
+  console.log("[Chat] createSingleConversation persisted", {
+    conversationId,
+    tabId: tabId ?? null,
   });
 }
 
@@ -6603,6 +7009,11 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
 
   setConversationLoading(persistConvId, true);
 
+  // 手机布局：发送开任务后切到对话视图，腾出输入区高度
+  if (IS_PHONE_CHAT && !opts?.summarizeTurn) {
+    setPhoneComposerVisible(false);
+  }
+
   if (isHandoffText) {
     markHandoffPending(persistConvId, "send2-doma");
   }
@@ -6723,13 +7134,16 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
         if (!!result && typeof result === "object" && "doma_show_alert" in (result as any)) {
           const alert = (result as any).doma_show_alert as { type?: string } | undefined;
           if (alert?.type === "userScripts") {
-            openActionModal({
-              title: t("chat.actionModal.userScripts.title"),
-              buttonText: t("chat.actionModal.userScripts.buttonText"),
-              onAction: () => {
-                window.open("https://developer.chrome.com/docs/extensions/reference/api/userScripts#enable-user-scripts-api", "_blank");
-              },
-            });
+            // Safari 无 UserScripts API / 无可开权限页；勿弹 Chrome 文档引导
+            if (!IS_SAFARI_EXT) {
+              openActionModal({
+                title: t("chat.actionModal.userScripts.title"),
+                buttonText: t("chat.actionModal.userScripts.buttonText"),
+                onAction: () => {
+                  window.open("https://developer.chrome.com/docs/extensions/reference/api/userScripts#enable-user-scripts-api", "_blank");
+                },
+              });
+            }
           } else {
             openProUpgradeActionModal();
           }
@@ -7225,84 +7639,9 @@ defineExpose({
   border-radius: 0;
 }
 
-.safari-shell-header {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  padding: 10px 12px 10px 14px;
-  background: var(--stay-background, #fff);
-  border-bottom: 1px solid var(--stay-border, #e0e0e0);
-}
-
-.safari-shell-brand {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  flex: 1 1 auto;
-}
-
-.safari-shell-icon.doma-icon {
-  display: block;
-  width: 18px;
-  height: 18px;
-  margin-right: 0;
-  flex: 0 0 auto;
-  background-color: var(--stay-logo, var(--stay-black));
-  mask-size: contain;
-  mask-repeat: no-repeat;
-  mask-position: center;
-  -webkit-mask-size: contain;
-  -webkit-mask-repeat: no-repeat;
-  -webkit-mask-position: center;
-}
-
-.safari-shell-title {
-  flex: 1 1 auto;
-  min-width: 0;
-  font-size: 13px;
-  font-weight: 700;
-  line-height: 1.3;
-  color: var(--stay-black, #222);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.safari-panel-close-btn {
-  flex: 0 0 auto;
-  align-self: center;
-  background: none;
-  border: none;
-  width: 36px;
-  height: 36px;
-  min-width: 36px;
-  min-height: 36px;
-  padding: 0;
-  margin: 0;
-  cursor: pointer;
-  color: var(--stay-black);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 8px;
-  line-height: 0;
-  transition:
-    color 0.16s ease,
-    background 0.16s ease;
-
-  &:hover {
-    background: var(--stay-border, #eee);
-  }
-
-  .safari-panel-close-icon {
-    display: block;
-    width: 18px;
-    height: 18px;
-    flex: 0 0 auto;
-  }
+/* 手机：输入视图时内容顶对齐，避免半屏里输入条沉底 */
+.chat-panel.chat-panel--phone {
+  justify-content: flex-start;
 }
 
 .chat-header {
@@ -7310,6 +7649,115 @@ defineExpose({
   border-bottom: 1px solid var(--stay-border, #e0e0e0);
   background: var(--stay-background, #fff);
   flex-shrink: 0;
+
+  &.chat-header--phone {
+    padding-top: 8px;
+    padding-bottom: 8px;
+
+    /* 手机：header 按钮一律禁掉粘滞 hover（含 slots 里的下载） */
+    :deep(.header-action-btn:hover:not(.active)),
+    :deep(.downloader-btn:hover:not(.active)),
+    :deep(.dbplus-btn:hover:not(.active)),
+    .header-action-btn:hover:not(.active),
+    .dbplus-btn:hover:not(.active) {
+      background: none !important;
+    }
+  }
+
+  /* 输入 / 对话：分段开关（滑块位移；两侧 icon 同大） */
+  .phone-view-toggle-btn {
+    flex: 0 0 auto;
+    align-self: center;
+    width: auto;
+    height: 30px;
+    margin-left: 4px;
+    padding: 0 !important;
+    border: none;
+    background: transparent;
+    color: var(--stay-black, #111);
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    border-radius: 10px;
+
+    .phone-view-toggle-track {
+      position: relative;
+      display: flex;
+      align-items: stretch;
+      width: 52px;
+      height: 30px;
+      padding: 3px;
+      box-sizing: border-box;
+      border-radius: 10px;
+      background: color-mix(in srgb, var(--stay-border, #888) 42%, transparent);
+      box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.22);
+    }
+
+    .phone-view-toggle-thumb {
+      position: absolute;
+      top: 3px;
+      bottom: 3px;
+      left: 3px;
+      width: calc(50% - 3px);
+      border-radius: 8px;
+      background:
+        linear-gradient(
+          180deg,
+          color-mix(in srgb, var(--stay-background, #fff) 100%, transparent) 0%,
+          color-mix(in srgb, var(--stay-background, #fff) 88%, var(--stay-border, #ccc)) 100%
+        );
+      box-shadow:
+        0 1px 0 rgba(255, 255, 255, 0.55) inset,
+        0 2px 6px rgba(0, 0, 0, 0.3),
+        0 0 0 1px color-mix(in srgb, var(--stay-border, #888) 40%, transparent);
+      transition: transform 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+      z-index: 0;
+      pointer-events: none;
+    }
+
+    .phone-view-toggle-slot {
+      position: relative;
+      z-index: 1;
+      flex: 1 1 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0.45;
+      transition: opacity 0.24s ease;
+      color: inherit;
+
+      :deep(svg) {
+        width: 15px;
+        height: 15px;
+        display: block;
+      }
+    }
+
+    &--chat {
+      .phone-view-toggle-thumb {
+        transform: translateX(0);
+      }
+      .phone-view-toggle-slot--bubble {
+        opacity: 1;
+      }
+    }
+
+    &--composer {
+      .phone-view-toggle-thumb {
+        transform: translateX(100%);
+      }
+      .phone-view-toggle-slot--cursor {
+        opacity: 1;
+      }
+    }
+
+    &:active .phone-view-toggle-track {
+      transform: scale(0.97);
+    }
+
+    &:focus {
+      outline: none;
+    }
+  }
 
   .chat-title-row {
     display: flex;
@@ -7386,9 +7834,28 @@ defineExpose({
       color 0.16s ease,
       background 0.16s ease;
     position: relative;
+    -webkit-tap-highlight-color: transparent;
 
-    &:hover {
-      background: var(--stay-border, #eee);
+    /* 仅精细指针启用 hover；触控上 :hover 会粘到「像一直选中」 */
+    @media (hover: hover) and (pointer: fine) {
+      &:hover {
+        background: var(--stay-border, #eee);
+      }
+    }
+
+    /* 触控设备强制去掉粘滞 hover（即便 WebKit 误报 hover:hover） */
+    @media (hover: none), (pointer: coarse) {
+      &:hover:not(.active) {
+        background: none;
+      }
+    }
+
+    &:focus {
+      outline: none;
+    }
+
+    &:focus:not(:focus-visible):not(.active) {
+      background: none;
     }
 
     &.active {

@@ -1,5 +1,6 @@
 import {
   deletePersistedConversationContext,
+  getPersistedConversationContext,
   persistConversationContext,
 } from "./conversationContextPersistence";
 import { getContext } from "../Context";
@@ -38,11 +39,32 @@ export type ConversationCallChainLink = {
 
 export class ConversationContextStore {
   private readonly conversationMap = new Map<string, ConversationContext>();
+  /** 同 conversationId 串行落盘；供创建会话后 await，避免工具立刻读盘 miss */
+  private readonly persistById = new Map<string, Promise<void>>();
 
   private queuePersist(ctx: ConversationContext): void {
-    void persistConversationContext(ctx).catch((e) => {
-      console.error("[ConversationContextStore] persist failed", e);
-    });
+    const id = ctx.conversationId;
+    const prev = this.persistById.get(id) ?? Promise.resolve();
+    const next = prev
+      .catch(() => {
+        // 保证链不断
+      })
+      .then(() => persistConversationContext(ctx));
+    this.persistById.set(id, next);
+    void next
+      .catch((e) => {
+        console.error("[ConversationContextStore] persist failed", e);
+      })
+      .finally(() => {
+        if (this.persistById.get(id) === next) this.persistById.delete(id);
+      });
+  }
+
+  async awaitPersist(conversationId: string): Promise<void> {
+    const id = typeof conversationId === "string" ? conversationId.trim() : "";
+    if (!id) return;
+    const pending = this.persistById.get(id);
+    if (pending) await pending;
   }
 
   private queueDeletePersisted(conversationId: string): void {
@@ -52,7 +74,7 @@ export class ConversationContextStore {
   }
 
   /**
-   * 从 IndexedDB 恢复时整表替换内存索引（不触发回写磁盘）。
+   * 从 storage.local 恢复时整表替换内存索引（不触发回写）。
    */
   replaceConversationMapsFromPersisted(entries: ConversationContext[]): void {
     this.conversationMap.clear();
@@ -349,4 +371,34 @@ export function pruneInvalidConversationContexts(): number {
 
 export function generateConversationId(): string {
   return `conv-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/** 等待本进程对该 conversationId 的 in-flight 落盘完成 */
+export async function awaitConversationContextPersist(conversationId: string): Promise<void> {
+  await conversationContextStore.awaitPersist(conversationId);
+}
+
+/**
+ * 从 storage.local 解析 conversationId → tabId（不读内存 map）。
+ * single → tabId；group → groupWorkingTabId。
+ */
+export async function getTabIdByConversationIdFromDisk(
+  conversationId: string,
+): Promise<number | undefined> {
+  const id = typeof conversationId === "string" ? conversationId.trim() : "";
+  if (!id) return undefined;
+  try {
+    const conversation = await getPersistedConversationContext(id);
+    if (!conversation) return undefined;
+    const tabId =
+      conversation.mode === "group"
+        ? conversation.groupWorkingTabId
+        : conversation.mode === "single"
+          ? conversation.tabId
+          : undefined;
+    return typeof tabId === "number" && Number.isFinite(tabId) ? tabId : undefined;
+  } catch (e) {
+    console.warn("[ConversationContextStore] getTabIdByConversationIdFromDisk failed:", e);
+    return undefined;
+  }
 }

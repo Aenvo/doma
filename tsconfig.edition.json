@@ -20,6 +20,9 @@
       "@/services/chat/sendEdition": [
         "src/services/chat/sendEdition.open.ts"
       ],
+      "@/services/chat/jev/jevRequest": [
+        "src/services/chat/jev/jevRequest.open.ts"
+      ],
       "@/services/chat/proUpgradeModal": [
         "src/services/chat/proUpgradeModal.open.ts"
       ],

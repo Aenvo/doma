@@ -27,6 +27,42 @@ export const isMobile = (): boolean => {
   return mobileRegex.test(ua);
 }
 
+/**
+ * 手机聊天布局（iPhone / Android 手机；不含 iPad / 大屏平板）。
+ * 用于侧栏紧凑 chrome：藏 host 条、发送后切对话视图等——开源语义是 phone，不是 Safari/iOS 特例。
+ */
+export function isPhoneChatLayout(): boolean {
+  if (typeof window === "undefined") return false;
+  const ua = window.navigator.userAgent || "";
+  // iPad（含桌面 UA 的 iPadOS）
+  if (/iPad/i.test(ua)) return false;
+  if (/Macintosh/i.test(ua) && (navigator.maxTouchPoints || 0) > 1) return false;
+  if (/iPhone|iPod/i.test(ua)) return true;
+  if (/Android/i.test(ua)) {
+    // 排除常见 Android 平板：宽边较长且 UA 无 Mobile
+    if (/Mobile/i.test(ua)) return true;
+    const w = Math.min(window.screen?.width || 0, window.screen?.height || 0);
+    return w > 0 && w < 600;
+  }
+  if (/webos|blackberry|windows phone/i.test(ua)) return true;
+  return false;
+}
+
+/**
+ * 手机 / 平板（非桌面）：含 iPhone、Android 手机/平板、iPad（含桌面 UA 的 iPadOS）。
+ * 用于隐藏工作区等桌面向入口。
+ */
+export function isPhoneOrPadLayout(): boolean {
+  if (typeof window === "undefined") return false;
+  if (isPhoneChatLayout()) return true;
+  const ua = window.navigator.userAgent || "";
+  if (/iPad/i.test(ua)) return true;
+  if (/Macintosh/i.test(ua) && (navigator.maxTouchPoints || 0) > 1) return true;
+  if (/Android/i.test(ua)) return true;
+  if (/webos|blackberry|windows phone/i.test(ua)) return true;
+  return false;
+}
+
 export const STAY_STORE_URL= "https://apps.apple.com/cn/app/stay-for-safari-%E6%B5%8F%E8%A7%88%E5%99%A8%E4%BC%B4%E4%BE%A3/id1591620171";
 export function isIOS() {
   return /iphone|ipad|ipod/i.test(navigator.userAgent);

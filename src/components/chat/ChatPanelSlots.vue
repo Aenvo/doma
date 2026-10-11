@@ -9,6 +9,7 @@ defineProps<{
     | 'downloader-panel'
     | 'account-panel'
     | 'login-welcome'
-    | 'first-chat-prompt';
+    | 'first-chat-prompt'
+    | 'header-trailing';
 }>();
 </script>

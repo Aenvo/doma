@@ -1,5 +1,8 @@
 <template>
-  <div class="host-row" v-if="resolvedOptions.length > 0">
+  <div
+    class="host-row"
+    v-if="resolvedOptions.length > 0 && (expanded || !hideCollapsedSummary)"
+  >
     <!-- loading：ChatPanel 在 AI 回复中为 true；仅 data-loading 标记，不阻止交互 -->
     <div
       class="picker-shell"
@@ -89,7 +92,7 @@
       </div>
 
       <div
-        v-else
+        v-else-if="!hideCollapsedSummary"
         class="picker-summary"
         :class="{ 'is-disabled': isEmpty }"
         role="button"
@@ -179,11 +182,17 @@ const props = defineProps<{
   options: ConversationPickerOption[];
   /** 父组件对话进行中为 true（仅作 data-loading 标记，不阻止展开/切换） */
   loading?: boolean;
+  /**
+   * 手机布局：默认不渲染折叠的 host/关闭行，仅 expanded 时全量列表。
+   * 由父组件按钮调用 expand() 打开。
+   */
+  hideCollapsedSummary?: boolean;
 }>();
 
 const emit = defineEmits<{
   (e: "change", conversationId: string): void;
   (e: "close", conversationId: string): void;
+  (e: "expanded-change", expanded: boolean): void;
 }>();
 
 const expanded = ref(false);
@@ -310,6 +319,7 @@ watch(
 );
 
 watch(expanded, async (open) => {
+  emit("expanded-change", open);
   if (!open) return;
   void refreshCurrentTabInfo();
   await nextTick();
@@ -318,9 +328,24 @@ watch(expanded, async (open) => {
 });
 
 function toggleExpanded() {
-  if (resolvedOptions.value.length <= 1) return;
+  if (resolvedOptions.value.length <= 1 && !props.hideCollapsedSummary) return;
   expanded.value = !expanded.value;
 }
+
+function expandPicker() {
+  expanded.value = true;
+}
+
+function collapsePicker() {
+  expanded.value = false;
+}
+
+defineExpose({
+  expand: expandPicker,
+  collapse: collapsePicker,
+  toggleExpand: toggleExpanded,
+  isExpanded: () => expanded.value,
+});
 
 function onCollapsedSummaryClick() {
   if (isEmpty.value) return;

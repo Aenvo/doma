@@ -118,6 +118,7 @@
  */
 
 import { getContext } from "@/services/Context";
+import { isSafariBuild } from "@/utils/safariBuild";
 import { writeWorkspaceFile } from "@/services/workspace/workspaceFs";
 import { putWorkspaceToolAsset, getWorkspaceToolAsset } from "@/services/workspace/workspaceToolAssetStore";
 import {
@@ -203,12 +204,17 @@ import {
 import {
   generateConversationId,
   getConversationContext,
+  getTabIdByConversationIdFromDisk,
   upsertConversationContext,
   replaceConversationMapsFromPersisted,
   listConversationContexts,
   removeConversationContext,
 } from "./conversationContextStore";
 import { awaitConversationContextPersistenceReady } from "./conversationContextPersistence";
+import {
+  resolveSafariMcpResponseTabId,
+  safariPanelOpenFlags,
+} from "./safariPanelHostTab";
 import { normalizePlanQuestionList, type PlanQuestionItem } from "./planQuestionsSession";
 import { memoryWrite, type MemoryCategory, type MemorySource } from "./memoryStore";
 import { getEditionToolHandlers, getEditionSlashCommands } from "@/services/chat/editionToolHandlers";
@@ -534,17 +540,155 @@ function tryResolveNavigationUrl(raw: string): string | undefined {
   return undefined;
 }
 
-/** 向侧栏 ChatPanel 查询 conversationId 绑定的 tabId（逻辑在面板内，不在 BG store）。 */
+/**
+ * Safari：iframe 侧栏拿不到可靠 tabId / SW 读 IDB 也不可靠。
+ * 直接问页内 panelShell（content），由 whoami 带回宿主 tabId。
+ */
+async function getTabIdByConversationIdFromSafariShell(
+  conversationId: string,
+): Promise<number | undefined> {
+  const browser = getContext().browser as any;
+  const candidates: number[] = [];
+  for (const [tid, open] of safariPanelOpenFlags()) {
+    if (open === true && typeof tid === "number" && Number.isFinite(tid)) {
+      candidates.push(tid);
+    }
+  }
+  const remembered = resolveSafariMcpResponseTabId(null);
+  if (typeof remembered === "number" && !candidates.includes(remembered)) {
+    candidates.push(remembered);
+  }
+
+  const askShell = (tabId: number): Promise<number | undefined> =>
+    new Promise((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        resolve(undefined);
+      }, 3000);
+      try {
+        browser.tabs.sendMessage(
+          tabId,
+          {
+            origin: "background",
+            operate: "safariPanel/getHostTabId",
+            conversationId,
+          },
+          (res: { tabId?: number; ok?: boolean } | undefined) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            if (browser.runtime.lastError) {
+              resolve(undefined);
+              return;
+            }
+            const id = res?.tabId;
+            resolve(typeof id === "number" && Number.isFinite(id) ? id : undefined);
+          },
+        );
+      } catch {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(undefined);
+      }
+    });
+
+  for (const tabId of candidates) {
+    const got = await askShell(tabId);
+    panelReloadLog("sw", "getTabId via panelShell", {
+      conversationId,
+      candidate: tabId,
+      got: got ?? null,
+    });
+    if (got != null) return got;
+    // sendMessage 假失败时，候选本身就是宿主 tab
+    panelReloadLog("sw", "getTabId fallback candidate", {
+      conversationId,
+      tabId,
+    });
+    return tabId;
+  }
+
+  try {
+    const tabs = await new Promise<Array<{ id?: number }>>((resolve) => {
+      try {
+        browser.tabs.query({ active: true, currentWindow: true }, (t: Array<{ id?: number }>) => {
+          if (browser.runtime.lastError) resolve([]);
+          else resolve(t ?? []);
+        });
+      } catch {
+        resolve([]);
+      }
+    });
+    const activeId = tabs[0]?.id;
+    if (typeof activeId === "number" && Number.isFinite(activeId)) {
+      const got = await askShell(activeId);
+      panelReloadLog("sw", "getTabId via panelShell activeTab", {
+        conversationId,
+        activeId,
+        got: got ?? null,
+      });
+      if (got != null) return got;
+      panelReloadLog("sw", "getTabId fallback activeTabId", {
+        conversationId,
+        activeId,
+      });
+      return activeId;
+    }
+  } catch (e) {
+    panelReloadLog("sw", "getTabId safari fail", {
+      conversationId,
+      error: e instanceof Error ? e.message : String(e),
+    });
+  }
+
+  panelReloadLog("sw", "getTabId safari miss", { conversationId });
+  return undefined;
+}
+
+/**
+ * conversationId → tabId。
+ * 优先 storage.local（Chrome/Safari 共享）；miss 时 Chrome 问侧栏，Safari 问 panelShell。
+ */
 async function getTabIdByConversationId(conversationId: string): Promise<number | undefined> {
   const id = typeof conversationId === "string" ? conversationId.trim() : "";
   if (!id) return undefined;
+
+  try {
+    const fromStorage = await getTabIdByConversationIdFromDisk(id);
+    if (fromStorage != null) {
+      panelReloadLog("sw", "getTabId via storage", {
+        conversationId: id,
+        tabId: fromStorage,
+      });
+      return fromStorage;
+    }
+  } catch (e) {
+    panelReloadLog("sw", "getTabId storage miss/error", {
+      conversationId: id,
+      error: e instanceof Error ? e.message : String(e),
+    });
+  }
+
+  if (isSafariBuild()) {
+    return getTabIdByConversationIdFromSafariShell(id);
+  }
+
   try {
     const res = await sendToSidePanel<{ tabId?: number }>({
       operate: "chat/getTabIdByConversationId",
       conversationId: id,
     });
     const tabId = res?.tabId;
-    return typeof tabId === "number" && Number.isFinite(tabId) ? tabId : undefined;
+    const resolved =
+      typeof tabId === "number" && Number.isFinite(tabId) ? tabId : undefined;
+    console.log("[browserTools] getTabIdByConversationId sidepanel", {
+      conversationId: id,
+      tabId: resolved ?? null,
+    });
+    return resolved;
   } catch (e) {
     console.warn("[browserTools] getTabIdByConversationId failed:", e);
     return undefined;
@@ -2574,16 +2718,58 @@ async function browser_navigate(args: Record<string, unknown>): Promise<unknown>
       groupId,
       mode: conversation?.mode,
       active,
+      safari: isSafariBuild(),
     });
-    await sendToSidePanel(
-      {
-        operate: "chat/runTabHandover",
-        sourceTabId: openerTabId,
-        newTabId,
-        url: finalUrl,
-      },
-      { expectResponse: false },
-    );
+    if (isSafariBuild() && typeof newTabId === "number") {
+      // Safari：opener 停流；handover 定点 newTab 的 panelShell。
+      // 壳侧短等 settle 再开栏（防 loading 砸进程）；12306 等可能永不 complete，勿长等。
+      void sendToSidePanel(
+        {
+          operate: "chat/abortForHandover",
+          conversationId,
+          sourceTabId: openerTabId,
+        },
+        { expectResponse: false, tabId: openerTabId },
+      );
+      try {
+        if (active) {
+          await getContext().browser.tabs.update(newTabId, { active: true });
+        }
+      } catch (e) {
+        console.warn("[DOMA_HANDOVER] safari activate newTab failed", e);
+      }
+      try {
+        // 短超时：永不 complete 的站到点继续，交给壳侧 timeout settle
+        await waitTabStatusComplete(newTabId, 4000);
+      } catch (e) {
+        console.warn("[DOMA_HANDOVER] safari wait newTab complete", e);
+      }
+      // 对齐 panelShell whenPageSettled(≤2.5s + 400ms)
+      await new Promise((r) => setTimeout(r, 900));
+      await sendToSidePanel(
+        {
+          operate: "chat/runTabHandover",
+          sourceTabId: openerTabId,
+          newTabId,
+          url: finalUrl,
+          // 工具回合内 navigate：新 tab 侧栏看不到 opener 的 loading Set，显式要求续跑
+          resume: true,
+        },
+        { expectResponse: false, tabId: newTabId },
+      );
+    } else {
+      // Chrome：窗口级侧栏，runtime 投递即可
+      await sendToSidePanel(
+        {
+          operate: "chat/runTabHandover",
+          sourceTabId: openerTabId,
+          newTabId,
+          url: finalUrl,
+          resume: true,
+        },
+        { expectResponse: false },
+      );
+    }
     console.log("[DOMA_HANDOVER]", "tools:send-runTabHandover:done", {
       sourceTabId: openerTabId,
       newTabId,
@@ -2655,6 +2841,7 @@ async function browser_call_tab(args: Record<string, unknown>): Promise<unknown>
     instrPreview: instruction.slice(0, 80),
   });
 
+  // Safari：投递到目标 tab 的 panelShell（call_tab 已 active 该 tab；payload 给业务）
   void sendToSidePanel(
     {
       operate: "chat/runCallTab",
@@ -2663,7 +2850,10 @@ async function browser_call_tab(args: Record<string, unknown>): Promise<unknown>
       instruction,
       addonInstruction,
     },
-    { expectResponse: false },
+    {
+      expectResponse: false,
+      ...(typeof targetTabId === "number" ? { tabId: targetTabId } : {}),
+    },
   );
   return { ok: true, tabId: targetTabId };
 }
@@ -3235,35 +3425,60 @@ async function browser_get_iframe(args: Record<string, unknown>): Promise<unknow
   };
 }
 
-async function browser_execute_script(args: Record<string, unknown>): Promise<unknown> {
-  if (!getContext().browser.userScripts || !getContext().browser.userScripts.execute){
+/**
+ * 任意 code 注入：
+ * - Safari：无 userScripts API，用 MV2 风格 tabs.executeScript({ code })
+ * - Chrome：走 userScripts.execute（需用户开启 Allow User Scripts）
+ */
+async function executeArbitraryPageCode(
+  tabId: number,
+  code: string,
+  allFrames: boolean,
+): Promise<unknown> {
+  if (isSafariBuild()) {
+    const tabsApi = getContext().browser.tabs as {
+      executeScript?: (
+        tabId: number,
+        details: { code: string; allFrames?: boolean },
+      ) => Promise<unknown>;
+    };
+    if (typeof tabsApi.executeScript !== "function") {
+      return { error: "tabs.executeScript unavailable on Safari" };
+    }
+    return await tabsApi.executeScript(tabId, { code, allFrames });
+  }
+
+  const userScripts = getContext().browser.userScripts as
+    | { execute?: (injection: unknown) => Promise<unknown> }
+    | undefined;
+  if (!userScripts?.execute) {
     return {
       doma_show_alert: {
-        type: "userScripts"
-      }
+        type: "userScripts",
+      },
     };
   }
+  return await userScripts.execute({
+    target: {
+      tabId,
+      allFrames,
+    },
+    js: [{ code }],
+  });
+}
+
+async function browser_execute_script(args: Record<string, unknown>): Promise<unknown> {
   const code = args.code as string;
   if (!code) return { error: "code required" };
-  
+
   const tabId = await getTabIdByConversationId(args.conversationId as string);
   if (!tabId) return { error: "no tab" };
   try {
-    // // 通过 tabs.sendMessage 发送到指定 tab 执行脚本
-    // const result = await getContext().browser.tabs.sendMessage(
-    //   tabId,
-    //   { origin: 'background', operate: 'script-runner/execute', script: { code, allFrames: args.allFrames as boolean || false } }
-    // );
-    // return result; 
-    return await getContext().browser.userScripts.execute({
-      target: { 
-        tabId,
-        allFrames: args.allFrames as boolean || false
-      },
-      js: [
-        {code}
-      ]
-    });
+    return await executeArbitraryPageCode(
+      tabId,
+      code,
+      (args.allFrames as boolean) || false,
+    );
   } catch (e) {
     return { error: String(e) };
   }
@@ -12915,14 +13130,6 @@ async function browser_get_clean_html(args: Record<string, unknown>): Promise<un
 }
 
 async function browser_get_video_caption(args: Record<string, unknown>): Promise<unknown> {
-  if (!getContext().browser.userScripts) {
-    return {
-      doma_show_alert: {
-        type: "userScripts",
-      },
-    };
-  }
-
   const conversationId = args.conversationId as string | undefined;
   if (!conversationId) {
     return { ok: false, error: "conversationId required" };
@@ -12943,14 +13150,6 @@ async function browser_get_video_caption(args: Record<string, unknown>): Promise
 }
 
 async function browser_seek_video(args: Record<string, unknown>): Promise<unknown> {
-  if (!getContext().browser.userScripts) {
-    return {
-      doma_show_alert: {
-        type: "userScripts",
-      },
-    };
-  }
-
   const conversationId = args.conversationId as string | undefined;
   if (!conversationId) {
     return { ok: false, error: "conversationId required" };

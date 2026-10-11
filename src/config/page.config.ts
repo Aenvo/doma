@@ -122,10 +122,13 @@ export const createFlatHtmlPlugin = (): PluginOption => {
           if (typeof newBundle.source === 'string') {
             const pageName = newKey.split("/")[0];
             const pageObj = pages[pageName];
-            newBundle.source = newBundle.source.replace(/..\/..\/..\//g, '../')
-                                              .replace(/<%- description %>/g, pageObj.description)
-                                              .replace(/<%- title %>/g, pageObj.title);
-
+            if (!pageObj) {
+              console.warn('[flat-html-generator] skip unknown html page', { key, newKey, pageName });
+            } else {
+              newBundle.source = newBundle.source.replace(/..\/..\/..\//g, '../')
+                                                .replace(/<%- description %>/g, pageObj.description)
+                                                .replace(/<%- title %>/g, pageObj.title);
+            }
           }
           bundle[newKey] = newBundle;
 

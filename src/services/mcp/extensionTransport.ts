@@ -276,6 +276,11 @@ export class ExtensionServerTransport implements Transport {
     async send(message: JSONRPCMessage){
         console.log("server transport send==================", message);
         const rpcSummary = summarizeJsonRpc(message);
+        console.log("[MCP-HOP][1/sw] server → sendToSidePanel(mcp/response)", {
+          ...rpcSummary,
+          expectResponse: false,
+          t: Date.now(),
+        });
         try {
           await sendToSidePanel(
             {
@@ -284,8 +289,13 @@ export class ExtensionServerTransport implements Transport {
             },
             { expectResponse: false },
           );
+          console.log("[MCP-HOP][1/sw] sendToSidePanel returned (shell ACK path)", rpcSummary);
           console.log("[MCP-SW] mcp/response via sendToSidePanel ok", rpcSummary);
         } catch (e) {
+          console.error("[MCP-HOP][1/sw] sendToSidePanel THREW", {
+            error: e instanceof Error ? e.message : String(e),
+            ...rpcSummary,
+          });
           console.error("[MCP-SW] mcp/response via sendToSidePanel threw", {
             error: e instanceof Error ? e.message : String(e),
             ...rpcSummary,

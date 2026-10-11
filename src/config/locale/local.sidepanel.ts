@@ -10,6 +10,11 @@ export default {
       newChat: "New chat",
       groupSession: "Start group session",
       history: "History",
+      phoneLayout: {
+        showComposer: "Show input",
+        showConversation: "Show conversation",
+        sessions: "Conversations",
+      },
       scheduled: {
         title: "Scheduled",
         menuItem: "Schedule message",
@@ -478,6 +483,11 @@ export default {
       newChat: "新对话",
       groupSession: "开启组会话",
       history: "历史会话",
+      phoneLayout: {
+        showComposer: "显示输入框",
+        showConversation: "显示对话",
+        sessions: "会话",
+      },
       scheduled: {
         title: "定时消息",
         menuItem: "定时消息",

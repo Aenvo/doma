@@ -27,6 +27,7 @@ import {
 } from "@/services/chat/jev/jevConfig";
 import { jevNeedsUserSetup } from "@/services/chat/jev/jevRequest";
 import type { AttachedFilePreviewPayload, ChatComposerBinding } from "./types";
+import { isPhoneOrPadLayout } from "@/utils/device";
 
 const props = defineProps<ChatComposerBinding>();
 
@@ -37,6 +38,9 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+
+/** 手机 / 平板：隐藏工作区入口（桌面向） */
+const hideWorkspaceBtn = isPhoneOrPadLayout();
 
 function handleAttachedFilePreview(payload: AttachedFilePreviewPayload) {
   props.onPreviewAttachedFile?.(payload);
@@ -487,19 +491,22 @@ defineExpose({
               {{ t("chat.composer.jevLabel") }}
             </span>
             <div class="composer-jev-switch-slot">
-              <button
+              <!-- div+role=switch：Safari 对 button 默认皮肤/尺寸会压住左侧「Jev」文案 -->
+              <div
                 v-if="jevUiReady"
-                type="button"
                 class="composer-jev-switch"
-                :class="{ on: jevEnabled }"
+                :class="{ on: jevEnabled, busy: jevToggleBusy }"
                 role="switch"
+                tabindex="0"
                 :aria-checked="jevEnabled"
                 :aria-label="t('chat.composer.jevToggleAria')"
-                :disabled="jevToggleBusy"
+                :aria-disabled="jevToggleBusy ? 'true' : 'false'"
                 @click="onJevSwitchClick"
+                @keydown.enter.prevent="onJevSwitchClick"
+                @keydown.space.prevent="onJevSwitchClick"
               >
                 <span class="composer-jev-switch-knob" aria-hidden="true"></span>
-              </button>
+              </div>
             </div>
           </div>
           <div class="composer-tools-scroll" aria-label="composer tools">
@@ -521,6 +528,7 @@ defineExpose({
               <PaperclipSvg class="attach-btn-icon" />
             </button>
             <button
+              v-if="!hideWorkspaceBtn"
               type="button"
               class="composer-icon-btn workspace-btn"
               title="工作区文件"
@@ -838,7 +846,7 @@ html.doma-safari .composer-input-mix {
 .composer-jev-wrap {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   flex-shrink: 0;
   margin-left: 2px;
   padding: 0 2px;
@@ -855,6 +863,8 @@ html.doma-safari .composer-input-mix {
   line-height: 1;
   cursor: pointer;
   letter-spacing: 0.02em;
+  flex-shrink: 0;
+  white-space: nowrap;
 
   &:hover {
     color: var(--stay-black, #2f3134);
@@ -870,33 +880,46 @@ html.doma-safari .composer-input-mix {
   line-height: 1;
   letter-spacing: 0.02em;
   user-select: none;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .composer-jev-switch-slot {
-  flex: 0 0 auto;
+  position: relative;
+  flex: 0 0 32px;
   width: 32px;
   height: 18px;
+  overflow: hidden;
 }
 
 .composer-jev-switch {
   position: relative;
-  flex: 0 0 auto;
+  display: block;
+  box-sizing: border-box;
   width: 32px;
   height: 18px;
+  margin: 0;
   padding: 0;
   border: none;
   border-radius: 9px;
   background: var(--stay-border, #d0d0d0);
   cursor: pointer;
+  outline: none;
   transition: background-color 0.2s ease;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
 
-  &:disabled {
+  &.busy {
     opacity: 0.55;
     cursor: not-allowed;
   }
 
   &.on {
     background: var(--stay-primary, #2f6fed);
+  }
+
+  &:focus-visible {
+    box-shadow: 0 0 0 2px rgba(47, 111, 237, 0.35);
   }
 }
 
@@ -945,24 +968,26 @@ html.doma-safari .composer-input-mix {
   padding: 4px 8px;
   border: none;
   border-radius: 8px;
-  background: rgba(47, 49, 52, 0.06);
+  background: color-mix(in srgb, var(--stay-black, #2f3134) 8%, transparent);
   color: var(--stay-black, #2f3134);
   cursor: pointer;
   font-size: var(--stay-text-footnote, 12px);
   font-weight: 500;
   line-height: 1.35;
   box-sizing: border-box;
-  transition: background 0.15s ease;
+  transition: background 0.15s ease, color 0.15s ease;
 
   &:hover {
-    background: rgba(47, 49, 52, 0.1);
+    background: color-mix(in srgb, var(--stay-black, #2f3134) 14%, transparent);
   }
 
+  /* Ask：用主题色混绿，暗黑下不再「浅绿底 + 浅字」 */
   &--ask {
-    background: rgb(220, 242, 220);
+    background: color-mix(in srgb, #3d9a4a 22%, var(--stay-background, #f8f8f6));
+    color: var(--stay-black, #2f3134);
 
     &:hover {
-      background: rgb(200, 232, 200);
+      background: color-mix(in srgb, #3d9a4a 32%, var(--stay-background, #f8f8f6));
     }
   }
 }
@@ -1055,7 +1080,8 @@ html.doma-safari .composer-input-mix {
   font-size: 11px;
   font-weight: 400;
   line-height: 1.35;
-  color: var(--stay-textSecondary, rgba(47, 49, 52, 0.62));
+  /* 随主题主色淡化，避免暗黑下落到固定深色 rgba */
+  color: color-mix(in srgb, var(--stay-black, #2f3134) 58%, var(--stay-background, #f8f8f6));
   white-space: nowrap;
 }
 
