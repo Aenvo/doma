@@ -29,7 +29,7 @@ from bridge_auth import load_or_create_token
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "doma"
-SERVER_VERSION = "0.7.4"
+SERVER_VERSION = "0.7.5"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONTROL_PORT = int(os.environ.get("DOMA_CONTROL_PORT", "3846"))

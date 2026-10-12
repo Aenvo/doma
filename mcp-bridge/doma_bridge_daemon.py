@@ -33,7 +33,7 @@ from xml.sax.saxutils import escape as xml_escape
 
 from bridge_auth import load_or_create_token
 
-SERVER_VERSION = "0.7.4"
+SERVER_VERSION = "0.7.5"
 BRIDGE_PROTOCOL_VERSION = 1
 CONTROL_PORT = int(os.environ.get("DOMA_CONTROL_PORT", "3846"))
 BRIDGE_PORT = int(os.environ.get("DOMA_BRIDGE_PORT", "3847"))
@@ -1084,7 +1084,8 @@ class ControlHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(403, {"ok": False, "text": "browser Origin forbidden", "status": "error"})
             return False
         expected = f"Bearer {load_or_create_token()}"
-        if not hmac.compare_digest(self.headers.get("Authorization", ""), expected):
+        supplied = self.headers.get("Authorization", "").encode("utf-8")
+        if not hmac.compare_digest(supplied, expected.encode("ascii")):
             self._send_json(401, {"ok": False, "text": "unauthorized", "status": "error"})
             return False
         return True

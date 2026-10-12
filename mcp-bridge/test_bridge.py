@@ -82,6 +82,13 @@ class BridgeAccessTests(unittest.TestCase):
         status, _, _ = self.request("OPTIONS", auth)
         self.assertEqual(status, 403)
 
+    def test_http_rejects_non_ascii_authorization_with_401(self) -> None:
+        for authorization in ("Bearer \u00e9", f"Bearer {self.token}\u00e9"):
+            with self.subTest(authorization=authorization[-1]):
+                status, _, body = self.request("GET", {"Authorization": authorization})
+                self.assertEqual(status, 401)
+                self.assertEqual(json.loads(body)["text"], "unauthorized")
+
     def test_http_rejects_oversized_body_before_dispatch(self) -> None:
         connection = http.client.HTTPConnection("127.0.0.1", daemon.CONTROL_PORT, timeout=2)
         try:
