@@ -25,6 +25,9 @@ export function registerEditionTabListeners(): void {
 
 export {
   configureGlobalSidePanel,
+  configureTabSidePanel,
+  configureExistingTabSidePanels,
+  configureTabScopedSidePanelAction,
   registerNativeSidePanelListeners,
   handleBrowserActionClicked,
   tryEnsureEditionSidePanel,

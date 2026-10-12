@@ -1145,12 +1145,12 @@ async function closeDialog() {
   border-radius: 999px;
   border: none;
   padding: 0;
-  background: rgba(0, 0, 0, 0.18);
+  background: var(--stay-switch-off, #2F3134);
   cursor: pointer;
   flex-shrink: 0;
   transition: background 0.15s ease;
   &.on {
-    background: var(--stay-logo, #0d9488);
+    background: var(--stay-switch-on, #22c55e);
   }
 }
 .provider-setup-switch-knob {

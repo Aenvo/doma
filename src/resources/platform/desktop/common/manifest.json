@@ -83,6 +83,7 @@
     },
 
     "permissions": [
+        "nativeMessaging",
         "<all_urls>",
         "sidePanel",
         "activeTab",

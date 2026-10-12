@@ -9,6 +9,10 @@ import {
 } from './llmTypes';
 import { LlmService } from './llmService';
 import {
+  appendRuntimeControl,
+  type LlmRequestControl,
+} from './toolLoopGuard';
+import {
   materializeToolResultContent,
 } from './contextManager';
 import { buildBrowserAssistantSystemPromptParts } from '../slashSkills';
@@ -44,12 +48,23 @@ export class QwenService extends LlmService {
     site: string,
     _ever: string,
     history: QwenMessage[],
+    requestControl: LlmRequestControl = {},
   ): Promise<RequestInit> {
     const { systemContent, basePrompt, skillSection } =
       await buildBrowserAssistantSystemPromptParts(BROWSER_ASSISTANT_SYSTEM_PROMPT);
-    const tools = [...(await this.mcpClient.getLlmTools())];
+    const controlledSystemContent = appendRuntimeControl(
+      systemContent,
+      requestControl,
+    );
+    const tools = requestControl.disableTools
+      ? []
+      : [...(await this.mcpClient.getLlmTools())];
     armTurnUsageFixed(conversationId, {
-      system: estimateTextTokens(basePrompt),
+      system: estimateTextTokens(
+        requestControl.controlInstruction
+          ? `${basePrompt}\n${requestControl.controlInstruction}`
+          : basePrompt,
+      ),
       skills: estimateTextTokens(skillSection),
       tools: estimateJsonTokens(tools),
       summarized: estimateSummarizedInHistory(history),
@@ -57,7 +72,7 @@ export class QwenService extends LlmService {
     const messages: QwenMessage[] = [
       {
         role: 'system',
-        content: systemContent,
+        content: controlledSystemContent,
       },
       ...history,
     ];
@@ -65,11 +80,15 @@ export class QwenService extends LlmService {
     const requestBody = {
       model: this.model,
       messages,
-      tools,
       max_tokens: 4096,
       stream: true,
       enable_thinking: false,
-      ...(this.consumeToolChoice() === "required" ? { tool_choice: "required" } : {}),
+      ...(requestControl.disableTools
+        ? {}
+        : {
+            tools,
+            ...(this.consumeToolChoice() === "required" ? { tool_choice: "required" } : {}),
+          }),
     };
 
     return {

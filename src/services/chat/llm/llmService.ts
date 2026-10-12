@@ -3,7 +3,6 @@ import type { McpClient } from "@/services/mcp/mcpClient";
 import { trimMessages, estimateMessagesTokens, prepareLlmHistory } from "./contextManager";
 import { CONTEXT_LIMITS } from "./contextManager";
 import { fetchSSE } from "../sseFetcher";
-import type { ToolResult } from "@/services/mcp/mcpServer";
 import { prepareUserSendText } from "../interactionBlockSendHints";
 import { applyLlmUsage } from "./contextUsage";
 import {
@@ -20,6 +19,45 @@ import {
 } from "./textOnlyToolRecovery";
 
 export type LlmToolChoiceMode = "auto" | "required";
+import { callBrowserToolViaRuntime } from "./browserToolRuntimeClient";
+import {
+  HARD_TOOL_ROUND_LIMIT,
+  createToolLoopState,
+  finalAnswerControlInstruction,
+  recordToolRound,
+  type LlmRequestControl,
+  type ToolLoopState,
+} from "./toolLoopGuard";
+
+export const MAX_TOOL_ROUNDS_PER_TURN = HARD_TOOL_ROUND_LIMIT;
+export const MAX_EMPTY_RESPONSE_RECOVERIES = 1;
+export const EMPTY_RESPONSE_RECOVERY_PROMPT =
+  "The previous attempt ended without a final answer. Respond to the original user request now with a concise final answer. Do not call another tool unless it is strictly necessary.";
+
+export class EmptyAssistantResponseError extends Error {
+  constructor() {
+    super("The model finished without returning a final answer");
+    this.name = "EmptyAssistantResponseError";
+  }
+}
+
+export class ToolRoundLimitError extends Error {
+  constructor(limit = MAX_TOOL_ROUNDS_PER_TURN) {
+    super(`The task exceeded the safety limit of ${limit} tool rounds`);
+    this.name = "ToolRoundLimitError";
+  }
+}
+
+export type LlmCallOutcome = "done" | "aborted" | "error";
+
+export function toolErrorPayload(toolName: string, error: unknown): Record<string, unknown> {
+  const message = error instanceof Error ? error.message : String(error);
+  return {
+    ok: false,
+    error: message || `Tool ${toolName} failed`,
+    tool: toolName,
+  };
+}
 
 function parseToolArguments(raw: string, toolName: string): Record<string, unknown> {
   try {
@@ -64,6 +102,7 @@ export class LlmService {
       site: string,
       ever: string,
       history: ConversationMessage[],
+      _requestControl: LlmRequestControl = {},
     ): Promise<RequestInit> {
         return {}
     }
@@ -140,8 +179,20 @@ export class LlmService {
         // this.conversationHistory.set(conversationId, history);
     
         const msgIds: string[] = [];
-        await this.call(conversationId, userId, deviceId, site, ever, history, options, msgIds, signal);
-        options.onConversationDone(conversationId, msgIds);
+        const outcome = await this.call(
+          conversationId,
+          userId,
+          deviceId,
+          site,
+          ever,
+          history,
+          options,
+          msgIds,
+          signal,
+        );
+        if (outcome !== "error") {
+          options.onConversationDone(conversationId, msgIds);
+        }
     }
 
     protected manageContext(history: ConversationMessage[]): ConversationMessage[] {
@@ -188,16 +239,35 @@ export class LlmService {
         history: ConversationMessage[],
         options: LlmSendMessageOptions,
         msgIds: string[],
-        signal: AbortSignal
-    ): Promise<void> {
+        signal: AbortSignal,
+        toolLoopState: ToolLoopState = createToolLoopState(),
+        emptyResponseRecoveries = 0,
+        requestControl: LlmRequestControl = {},
+    ): Promise<LlmCallOutcome> {
         console.log(`Calling ${this.getName()} llm with model ${this.model}`);
         const msgId = `msg-${Date.now()}-${Math.random().toString(36).slice(2)}`;
         try{
             msgIds.push(msgId);
             options.onMessageStart(_conversationId, msgId);
             let assistantText = '';
+            let assistantReasoning = '';
+            let finishReason = '';
+            let sawToolCall = false;
             await prepareLlmHistory(history as Parameters<typeof prepareLlmHistory>[0], _conversationId);
-            for await (const sseEvent of fetchSSE(this.endPoint(), await this.fetchOptions(_conversationId, userId, deviceId, site, ever, history), msgId, signal)) {
+            for await (const sseEvent of fetchSSE(
+              this.endPoint(),
+              await this.fetchOptions(
+                _conversationId,
+                userId,
+                deviceId,
+                site,
+                ever,
+                history,
+                requestControl,
+              ),
+              msgId,
+              signal,
+            )) {
               if (sseEvent.type === 'usage' && sseEvent.usage) {
                 applyLlmUsage(_conversationId, sseEvent.usage);
                 console.log("[usage debug] onUsage", {
@@ -209,13 +279,28 @@ export class LlmService {
               }
               if (sseEvent.type === 'text') {
                 assistantText += sseEvent.content;
-                options.onTextMessage(_conversationId, sseEvent.msgId!, sseEvent.content);
+              }
+              if (sseEvent.type === 'reasoning') {
+                assistantReasoning += sseEvent.content;
+                options.onReasoningMessage?.(
+                  _conversationId,
+                  sseEvent.msgId!,
+                  sseEvent.content,
+                );
+              }
+              if (sseEvent.type === 'done' && sseEvent.finishReason) {
+                finishReason = sseEvent.finishReason;
               }
               if (sseEvent.type === 'tool_call') {
+                if (requestControl.disableTools) {
+                  throw new ToolRoundLimitError();
+                }
+                sawToolCall = true;
                 // assistant 的 tool_calls 消息必须在 tool result 之前加入历史
                 history.push({
                   role: 'assistant',
                   content: assistantText || null,
+                  ...(assistantReasoning ? { reasoning_content: assistantReasoning } : {}),
                   tool_calls: sseEvent.toolCalls!.map(tc => ({
                     id: tc.id,
                     type: tc.type,
@@ -234,76 +319,63 @@ export class LlmService {
                       toolName: toolCall.function.name,
                     });
                     options.onToolCallStart(_conversationId, sseEvent.msgId!, toolCall);
-                    let toolArgs: Record<string, unknown>;
+                    let result: unknown;
                     try {
-                      toolArgs = parseToolArguments(
+                      const toolArgs = parseToolArguments(
                         toolCall.function.arguments,
                         toolCall.function.name,
                       );
-                    } catch (parseErr) {
-                      const errMsg =
-                        parseErr instanceof Error ? parseErr.message : String(parseErr);
+                      // 强制以当前会话为准，避免模型误把 tabId 传到 conversationId
+                      toolArgs.conversationId = _conversationId;
+
+                      // Ask 轮：页面/Tab 变更类 tool 直接拒绝（不执行），带 instruction 引导切 Agent
+                      if (
+                        isAskModeRound(history) &&
+                        isAskBlockedPageTool(toolCall.function.name, toolArgs)
+                      ) {
+                        result = buildAskPageToolBlockedPayload(
+                          toolCall.function.name,
+                          getLastUserVisibleGoal(history),
+                        );
+                      } else {
+                        const timeoutMs =
+                          typeof toolArgs.timeoutMs === "number" && Number.isFinite(toolArgs.timeoutMs)
+                            ? Math.max(1, Math.floor(toolArgs.timeoutMs))
+                            : 60_000;
+                        result = await callBrowserToolViaRuntime(
+                          toolCall.function.name,
+                          toolArgs,
+                          timeoutMs,
+                          signal,
+                        );
+                      }
+                    } catch (toolError) {
+                      if ((toolError as { name?: string })?.name === "AbortError" || signal.aborted) {
+                        throw toolError;
+                      }
+                      console.warn(`[${this.getName()}] Tool call failed; returning error to model`, {
+                        conversationId: _conversationId,
+                        toolName: toolCall.function.name,
+                        error: toolError instanceof Error ? toolError.message : String(toolError),
+                      });
+                      result = toolErrorPayload(toolCall.function.name, toolError);
+                    }
+
+                    try {
+                      const overrideResult = await options.onToolCallOverride(
+                        _conversationId,
+                        sseEvent.msgId!,
+                        toolCall,
+                        result,
+                      );
                       llmToolCallResults.push({
                         tool_call_id: toolCall.id,
-                        result: {
-                          content: [
-                            {
-                              type: "text",
-                              text: JSON.stringify({ ok: false, error: errMsg }),
-                            },
-                          ],
-                        },
+                        result: overrideResult ?? result,
                         name: toolCall.function.name,
                       });
+                    } finally {
                       options.onToolCallDone(_conversationId, sseEvent.msgId!, toolCall);
-                      continue;
                     }
-                    // 强制以当前会话为准，避免模型误把 tabId 传到 conversationId
-                    toolArgs.conversationId = _conversationId;
-
-                    let result: unknown;
-                    // Ask 轮：页面/Tab 变更类 tool 直接拒绝（不 callTool），带 instruction 引导切 Agent
-                    if (
-                      isAskModeRound(history) &&
-                      isAskBlockedPageTool(toolCall.function.name, toolArgs)
-                    ) {
-                      result = buildAskPageToolBlockedPayload(
-                        toolCall.function.name,
-                        getLastUserVisibleGoal(history),
-                      );
-                    } else {
-                      const timeoutMs =
-                        typeof toolArgs.timeoutMs === "number" && Number.isFinite(toolArgs.timeoutMs)
-                          ? Math.max(1, Math.floor(toolArgs.timeoutMs))
-                          : 60_000;
-                      const toolResult = (await this.mcpClient.callTool(
-                        {
-                          name: toolCall.function.name,
-                          arguments: toolArgs,
-                        },
-                        undefined,
-                        { timeout: timeoutMs, maxTotalTimeout: timeoutMs },
-                      )) as ToolResult;
-                      const firstContent = toolResult.content[0];
-                      const firstText =
-                        firstContent && firstContent.type === "text" ? firstContent.text : "";
-                      result = firstText.startsWith("__JSON__")
-                        ? JSON.parse(firstText.slice(8))
-                        : firstText;
-                    }
-
-                    const overrideResult = await options.onToolCallOverride(
-                      _conversationId,
-                      sseEvent.msgId!,
-                      toolCall,
-                      result,
-                    );
-                    llmToolCallResults.push({
-                      tool_call_id: toolCall.id,
-                      result: overrideResult || result,
-                      name: toolCall.function.name,
-                    });
-                    options.onToolCallDone(_conversationId, sseEvent.msgId!, toolCall);
                   }
                 }
     
@@ -314,24 +386,113 @@ export class LlmService {
                   llmToolCallResults,
                 );
                 if (halt) {
-                  return;
+                  return "done";
                 }
-                await this.call(_conversationId, userId, deviceId, site, ever, history, options, msgIds, signal);
-                return;
+                const decision = recordToolRound(
+                  toolLoopState,
+                  sseEvent.toolCalls!,
+                  llmToolCallResults,
+                );
+                if (decision.kind === "finalize") {
+                  console.warn(`[${this.getName()}] Finalizing tool loop`, {
+                    conversationId: _conversationId,
+                    reason: decision.reason,
+                    roundsCompleted: toolLoopState.roundsCompleted,
+                    totalToolCalls: toolLoopState.totalToolCalls,
+                  });
+                  return await this.call(
+                    _conversationId,
+                    userId,
+                    deviceId,
+                    site,
+                    ever,
+                    history,
+                    options,
+                    msgIds,
+                    signal,
+                    toolLoopState,
+                    emptyResponseRecoveries,
+                    {
+                      disableTools: true,
+                      controlInstruction: finalAnswerControlInstruction(
+                        toolLoopState,
+                        decision.reason,
+                      ),
+                    },
+                  );
+                }
+                return await this.call(
+                  _conversationId,
+                  userId,
+                  deviceId,
+                  site,
+                  ever,
+                  history,
+                  options,
+                  msgIds,
+                  signal,
+                  toolLoopState,
+                  emptyResponseRecoveries,
+                  decision.controlInstruction
+                    ? { controlInstruction: decision.controlInstruction }
+                    : {},
+                );
               }
             }
 
             // 纯文本回复结束，将 assistant 消息加入历史
             if (assistantText) {
-              history.push({ role: 'assistant', content: assistantText } as any);
+              history.push({
+                role: 'assistant',
+                content: assistantText,
+                ...(assistantReasoning ? { reasoning_content: assistantReasoning } : {}),
+              } as any);
             }
 
-            options.onMessageDone(_conversationId, msgId);
+            if (!assistantText.trim() && !sawToolCall) {
+              options.onMessageDone(_conversationId, msgId);
+              if (
+                emptyResponseRecoveries < MAX_EMPTY_RESPONSE_RECOVERIES &&
+                !signal.aborted
+              ) {
+                console.warn(`[${this.getName()}] Empty final response; retrying once`, {
+                  conversationId: _conversationId,
+                  finishReason,
+                  reasoningLength: assistantReasoning.length,
+                });
+                const recoveryMessage: ConversationMessage = {
+                  role: "user",
+                  content: EMPTY_RESPONSE_RECOVERY_PROMPT,
+                };
+                history.push(recoveryMessage);
+                try {
+                  return await this.call(
+                    _conversationId,
+                    userId,
+                    deviceId,
+                    site,
+                    ever,
+                    history,
+                    options,
+                    msgIds,
+                    signal,
+                    toolLoopState,
+                    emptyResponseRecoveries + 1,
+                    requestControl,
+                  );
+                } finally {
+                  const recoveryIndex = history.indexOf(recoveryMessage);
+                  if (recoveryIndex >= 0) history.splice(recoveryIndex, 1);
+                }
+              }
+              throw new EmptyAssistantResponseError();
+            }
 
             // text-only 回收：口头要操作却未发 tool_call → 最多强制一轮 required
             if (
               assistantText.trim() &&
               !signal.aborted &&
+              !requestControl.disableTools &&
               (await shouldForceToolRecovery({
                 conversationId: _conversationId,
                 history,
@@ -349,7 +510,8 @@ export class LlmService {
                 conversationId: _conversationId,
                 textPreview: assistantText.trim().slice(0, 80),
               });
-              await this.call(
+              options.onMessageDone(_conversationId, msgId);
+              return await this.call(
                 _conversationId,
                 userId,
                 deviceId,
@@ -359,18 +521,29 @@ export class LlmService {
                 options,
                 msgIds,
                 signal,
+                toolLoopState,
+                emptyResponseRecoveries,
+                {},
               );
             }
-            return;
+
+            // 一轮响应可能先输出进度文本，随后才发起 tool_call。只有整轮确认没有
+            // 工具调用时才发布为用户可见正文，避免把临时播报持久化成聊天消息。
+            if (assistantText) {
+              options.onTextMessage(_conversationId, msgId, assistantText);
+            }
+            options.onMessageDone(_conversationId, msgId);
+            return "done";
           }
           catch (e) {
             // 用户主动 abort 时，不应当作为错误噪音输出，也不应当让上层认为“崩溃”
             if ((e as any)?.name === 'AbortError' || signal?.aborted) {
               console.log(`[${this.getName()}] Request aborted`);
-              return;
+              return "aborted";
             }
             console.error(`[${this.getName()}] API call failed:`, e);
-            options.onMessageError(_conversationId, msgId, e as Error);
+            await options.onMessageError(_conversationId, msgId, e as Error);
+            return "error";
           }
     }
 

@@ -165,18 +165,26 @@
         <div v-if="showHistory" key="history" class="chat-header-panel-mount">
           <div class="chat-header-panel-inner">
       <div class="history-panel">
-        <div class="history-search">
-          <span class="history-search-icon" aria-hidden="true">
-            <svg focusable="false" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
-              <path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z" />
-            </svg>
-          </span>
-          <input
-            v-model="historySearchQuery"
-            type="search"
-            class="history-search-input"
-            :placeholder="t('chat.historyPanel.searchPlaceholder')"
-          />
+        <div class="history-toolbar">
+          <div class="history-search">
+            <span class="history-search-icon" aria-hidden="true">
+              <svg focusable="false" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+                <path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z" />
+              </svg>
+            </span>
+            <input
+              v-model="historySearchQuery"
+              type="search"
+              class="history-search-input"
+              :placeholder="t('chat.historyPanel.searchPlaceholder')"
+            />
+          </div>
+          <button
+            type="button"
+            class="history-delete-all-btn"
+            :disabled="historyDeleteBusy || (!historySearchQuery.trim() && groupedHistoryConversations.length === 0)"
+            @click="deleteAllHistoryConversations"
+          >{{ t('chat.historyPanel.deleteAll') }}</button>
         </div>
 
         <div class="history-scroll" v-if="groupedHistoryConversations.length > 0">
@@ -398,7 +406,7 @@
         <!-- 普通消息 -->
         <template v-for="(item, dIdx) in displayMessages" :key="`${item.type}-${item.id}-${dIdx}`">
           <div
-            v-if="item.type === 'message' && shouldShowChatMessageRow(item.msg)"
+            v-if="item.type === 'message' && shouldShowChatMessageRow(item.msg) && isMcpDisplayItemVisible(item)"
             :class="[
               'chat-msg',
               item.msg.role,
@@ -415,6 +423,8 @@
                 'chat-msg--mcp-call':
                   item.msg.role === 'user' &&
                   hasInteractionBlockMcpCallTag(String(item.msg.content ?? '')),
+                'chat-msg--mcp-collapsed':
+                  item.msg.role === 'user' && mcpCallBadgeLabel(item.msg) && !isMcpTurnExpanded(item.msg.id),
                 'chat-msg--scheduled':
                   item.msg.role === 'user' &&
                   hasInteractionBlockScheduledTag(String(item.msg.content ?? '')),
@@ -427,6 +437,13 @@
             class="chat-msg-mcp-badge"
             aria-hidden="true"
           >{{ mcpCallBadgeLabel(item.msg) }}</span>
+          <div v-if="item.msg.role === 'user' && mcpCallBadgeLabel(item.msg)" class="mcp-turn-record">
+            <div v-if="mcpTurnTarget(item.msg)" class="mcp-turn-target" :title="mcpTurnTarget(item.msg)">{{ mcpTurnTarget(item.msg) }}</div>
+            <div class="mcp-turn-status">{{ mcpTurnSummary(item.msg.id) }}</div>
+            <button type="button" class="mcp-turn-toggle" :aria-expanded="isMcpTurnExpanded(item.msg.id)" @click.stop="toggleMcpTurn(item.msg.id)">
+              {{ isMcpTurnExpanded(item.msg.id) ? '收起往返' : '展开完整往返' }}
+            </button>
+          </div>
           <span
             v-else-if="
               item.msg.role === 'user' &&
@@ -443,6 +460,11 @@
             class="chat-msg-doma-badge"
             aria-hidden="true"
           >DomA</span>
+          <TurnActivityTraceView
+            v-if="item.msg.role === 'assistant' && item.msg.activityTrace"
+            :trace="item.msg.activityTrace"
+            @toggle="onActivityTraceToggle(item.msg)"
+          />
           <!-- user: 纯文本渲染；assistant: Markdown 渲染（已做 XSS 清洗） -->
           <div
             v-if="
@@ -473,7 +495,10 @@
           <AssistantMessageContent
             v-else-if="
               item.msg.role === 'assistant' &&
-              (item.msg.content?.trim() || activeStreamMsgId === item.msg.id)
+              (
+                item.msg.content?.trim() ||
+                (activeStreamMsgId === item.msg.id && !item.msg.activityTrace)
+              )
             "
             :content="String(item.msg.content)"
             :streaming="activeStreamMsgId === item.msg.id"
@@ -521,9 +546,14 @@
           <div
             v-if="
               item.msg.toolBarItems?.length ||
-              getVisibleToolCalls(item.msg.toolCalls).length ||
-              getDoingToolCalls(item.msg.toolCalls).length ||
-              (toolDebug && getDebugToolCalls(item.msg.toolCalls).length)
+              (
+                !item.msg.activityTrace &&
+                (
+                  getVisibleToolCalls(item.msg.toolCalls).length ||
+                  getDoingToolCalls(item.msg.toolCalls).length ||
+                  (toolDebug && getDebugToolCalls(item.msg.toolCalls).length)
+                )
+              )
             "
             class="msg-actions"
           >
@@ -668,7 +698,7 @@
             @action="(action: string, data: Record<string, unknown>) => handleCustomUIAction(item.msg.id, action, data)"
           />
         </div>
-        <div v-else-if="item.type === 'process-group'" class="process-group" :class="{ executing: item.isExecuting }">
+        <div v-else-if="item.type === 'process-group' && isMcpDisplayItemVisible(item)" class="process-group" :class="{ executing: item.isExecuting }">
           <div class="process-header">
             <ChatExpandRightSvg :class="['expand-icon', { expanded: true }]" />
             <span class="process-title">
@@ -703,12 +733,6 @@
       </template>
       <div v-if="showPlanQuestionsCard" class="chat-msg assistant plan-questions-msg">
         <PlanQuestionsCard />
-      </div>
-      <!-- 思考中状态：由 thinking 标志位控制 -->
-      <div v-if="thinking" class="chat-msg assistant thinking">
-        <div class="thinking-indicator" aria-label="thinking">
-          <span class="thinking-ball" aria-hidden="true"></span>
-        </div>
       </div>
         <!-- 底部占位，确保滚动到底部时内容不被遮挡 -->
         <div class="scroll-anchor" aria-hidden="true"></div>
@@ -881,6 +905,7 @@ import { llmManager, type LlmProvider, type LlmResponse, DEFAULT_MODELS } from "
 import { chatStorage, newChatMessageId, type StoredConversation, type StoredMessage } from "@/services/chat/chatStorage";
 import CustomUIRenderer from "./CustomUIRenderer.vue";
 import AssistantMessageContent from "./AssistantMessageContent.vue";
+import TurnActivityTraceView from "./TurnActivityTrace.vue";
 import ConversationPicker from "./ConversationPicker.vue";
 import ChatComposer from "./composer/ChatComposer.vue";
 import CreateExtensionDescDialog from "./composer/CreateExtensionDescDialog.vue";
@@ -920,6 +945,7 @@ import { getExtensionAsset } from "@/services/chat/extensionAssetStore";
 import { buildZipBlob, triggerBlobDownload } from "@/services/chat/extensionZip";
 import { normalizeMcpExternalSendText } from "@/services/chat/mcpExternalSend";
 import { notePanelActivity, pingServiceWorker, logIdleDiag } from "@/services/chat/swIdleDiag";
+import { assembleMcpTurnResult, type McpTurnResult } from "@/services/chat/mcpResult";
 import {
   DOMA_CLI_BRIDGE_PORT,
   DOMA_MCP_BRIDGE_PORT,
@@ -927,12 +953,22 @@ import {
   sendMcpBridgeAccepted,
   sendMcpBridgeResult,
   sendMcpBridgeRunning,
+  setMcpBridgePanelContext,
   startMcpBridgeClient,
   stopMcpBridgeClient,
   type McpBridgeInboundMessage,
 } from "@/services/chat/mcpBridgeClient";
 import { isCliBridgeEnabled, isMcpBridgeEnabled } from "@/services/chat/mcpBridgePrefs";
 import { prepareUserSendText } from "@/services/chat/interactionBlockSendHints";
+import {
+  cloneTurnActivityTrace,
+  completeToolInTrace,
+  completeTraceBeforeAnswer,
+  createTurnActivityTrace,
+  finishTurnActivityTrace,
+  reopenTurnActivityTrace,
+  startToolInTrace,
+} from "@/services/chat/activityTrace";
 import {
   enrichUserSendTextWithMemories,
   type ActiveTabContext,
@@ -977,6 +1013,7 @@ import {
   type UserscriptsPayload,
   type ChatMessageToolBarItem,
   type ChatMessageToolCall,
+  type TurnActivityTrace,
   type CopySelectionAnchor,
   type CopySelectionChipPayload,
   type PageElementsPayload,
@@ -1045,7 +1082,10 @@ import domaIconMaskUrl from "@/assets/images/doma-icon.svg?url";
 import DbPlusSvg from "@/assets/images/db-plus.svg";
 import McpLinkSvg from "@/assets/images/mcp-link.svg";
 import ConnectorPanel from "@/components/chat/ConnectorPanel.vue";
-import { isHttpError } from "@/services/chat/sseFetcher";
+import {
+  isHttpError,
+  isSseIdleTimeoutError,
+} from "@/services/chat/sseFetcher";
 const domaIconMaskStyle = {
   maskImage: `url("${domaIconMaskUrl}")`,
   WebkitMaskImage: `url("${domaIconMaskUrl}")`,
@@ -1119,6 +1159,10 @@ import { isPhoneChatLayout } from "@/utils/device";
 
 /** Safari 页内壳：禁 tabs/windows；宿主 tab 由 edition(pro) + panelShell 注入 */
 const IS_SAFARI_EXT = isSafariSidePanelShell();
+const panelHostTabId = (() => {
+  const value = Number(new URLSearchParams(window.location.search).get("domaTabId"));
+  return Number.isInteger(value) && value > 0 ? value : undefined;
+})();
 
 /** 手机侧栏布局（iPhone / Android 手机；开源语义，非 Safari 特例） */
 const IS_PHONE_CHAT = isPhoneChatLayout();
@@ -1386,6 +1430,11 @@ const CHAT_TYPEWRITER_ENABLED = false;
 
 const loadingConversationIds = ref<Set<string>>(new Set());
 const thinkingConversationIds = ref<Set<string>>(new Set());
+type ActivityTraceRuntime = {
+  rootMessageId: string;
+  trace: TurnActivityTrace;
+};
+const activityTraceByConversation = new Map<string, ActivityTraceRuntime>();
 /** 当前正在流式输出的 assistant 消息 id（用于轻量增量渲染） */
 const activeStreamMsgId = ref<string | null>(null);
 const abortControllersByConversation = new Map<string, AbortController>();
@@ -1395,6 +1444,8 @@ const mcpExternalTaskQueue: Array<{
   sendText: string;
   callerAgent: string;
   attachments: unknown[];
+  targetTabId?: number;
+  targetUrl?: string;
 }> = [];
 let chatPanelReadyForMcp = false;
 
@@ -1496,6 +1547,8 @@ async function processMcpExternalTask(payload: {
   sendText: string;
   callerAgent: string;
   attachments?: unknown[];
+  targetTabId?: number;
+  targetUrl?: string;
 }): Promise<void> {
   const { requestId, callerAgent } = payload;
   // 块内仅 Agent 名；instruction 必须在 interactionBlock 外
@@ -1529,7 +1582,16 @@ async function processMcpExternalTask(payload: {
   }
 
   try {
-    await startGroupSession();
+    if (payload.targetTabId != null && payload.targetTabId !== panelHostTabId) {
+      throw new Error("MCP 指定网页与当前 DomA 侧栏不匹配，请在目标网页重新打开侧栏");
+    }
+    if (payload.targetTabId != null && payload.targetUrl) {
+      const current = await getContext().browser.tabs.get(payload.targetTabId);
+      if (current.url !== payload.targetUrl) {
+        throw new Error("目标网页已跳转，请重新发起任务并确认网页");
+      }
+    }
+    await startGroupSession(payload.targetTabId);
     // conversationId 由 startGroupSession 生成；MCP 返回的必须是这个 id
     const cid = conversationId.value;
     if (!cid) {
@@ -1552,12 +1614,17 @@ async function processMcpExternalTask(payload: {
       });
       return;
     }
-    await addMessage(cid, "user", sendText);
+    const targetTab = await getContext().browser.tabs.get(payload.targetTabId ?? panelHostTabId! ).catch(() => null);
+    const mcpUserMessageId = await addMessage(cid, "user", sendText, undefined, {
+      mcpTurn: { callerAgent, targetTitle: targetTab?.title || "", targetUrl: payload.targetUrl || targetTab?.url || "", status: "running" },
+    });
     await send2(sendText, {
       conversationId: cid,
       skipUserMessage: true,
       skipSummarizeGate: true,
       mcpConversationId: cid,
+      mcpRequestId: requestId,
+      mcpUserMessageId,
     });
   } catch (e) {
     reportMcpExternalResult({
@@ -1575,6 +1642,8 @@ function handleMcpExternalTaskMessage(message: {
   sendText?: unknown;
   callerAgent?: unknown;
   attachments?: unknown;
+  targetTabId?: unknown;
+  targetUrl?: unknown;
 }): { ok: boolean; error?: string; queued?: boolean } {
   const requestId = typeof message.requestId === "string" ? message.requestId.trim() : "";
   const rawSend = typeof message.sendText === "string" ? message.sendText.trim() : "";
@@ -1587,7 +1656,11 @@ function handleMcpExternalTaskMessage(message: {
 
   const sendText = normalizeMcpExternalSendText(rawSend, callerAgent);
   const attachments = Array.isArray(message.attachments) ? message.attachments : [];
-  const item = { requestId, sendText, callerAgent, attachments };
+  const targetTabId = typeof message.targetTabId === "number" && Number.isInteger(message.targetTabId)
+    ? message.targetTabId
+    : undefined;
+  const targetUrl = typeof message.targetUrl === "string" ? message.targetUrl : undefined;
+  const item = { requestId, sendText, callerAgent, attachments, targetTabId, targetUrl };
 
   if (!chatPanelReadyForMcp) {
     mcpExternalTaskQueue.push(item);
@@ -1645,12 +1718,17 @@ async function processMcpExternalMessage(payload: {
       });
       return;
     }
-    await addMessage(targetConversationId, "user", sendText);
+    const targetUrl = await resolveCurrentConversationUrl().catch(() => "");
+    const mcpUserMessageId = await addMessage(targetConversationId, "user", sendText, undefined, {
+      mcpTurn: { callerAgent, targetUrl, status: "running" },
+    });
     await send2(sendText, {
       conversationId: targetConversationId,
       skipUserMessage: true,
       skipSummarizeGate: true,
       mcpConversationId: targetConversationId,
+      mcpRequestId: requestId,
+      mcpUserMessageId,
     });
   } catch (e) {
     reportMcpExternalResult({
@@ -1821,6 +1899,81 @@ function setConversationThinking(convId: string, active: boolean) {
   thinkingConversationIds.value = next;
 }
 
+function publishActivityTrace(convId: string, runtime: ActivityTraceRuntime): void {
+  upsertAssistantMessage(
+    convId,
+    runtime.rootMessageId,
+    "",
+    undefined,
+    undefined,
+    cloneTurnActivityTrace(runtime.trace),
+  );
+}
+
+function startActivityTrace(convId: string, msgId: string): ActivityTraceRuntime {
+  const existing = activityTraceByConversation.get(convId);
+  if (existing) {
+    reopenTurnActivityTrace(existing.trace);
+    publishActivityTrace(convId, existing);
+    return existing;
+  }
+
+  const runtime: ActivityTraceRuntime = {
+    rootMessageId: msgId,
+    trace: createTurnActivityTrace(msgId),
+  };
+  activityTraceByConversation.set(convId, runtime);
+  publishActivityTrace(convId, runtime);
+  return runtime;
+}
+
+function startActivityTool(convId: string, msgId: string, toolCall: any): void {
+  const runtime = activityTraceByConversation.get(convId) ?? startActivityTrace(convId, msgId);
+  startToolInTrace(runtime.trace, toolCall, (key, named) => t(key, named ?? {}));
+  publishActivityTrace(convId, runtime);
+}
+
+function completeActivityTool(convId: string, toolCall: any, result?: unknown): void {
+  const runtime = activityTraceByConversation.get(convId);
+  if (!runtime) return;
+  if (completeToolInTrace(
+    runtime.trace,
+    toolCall,
+    result,
+    (key, named) => t(key, named ?? {}),
+  )) {
+    publishActivityTrace(convId, runtime);
+  }
+}
+
+function completeActivityBeforeAnswer(convId: string): void {
+  const runtime = activityTraceByConversation.get(convId);
+  if (!runtime) return;
+  if (completeTraceBeforeAnswer(runtime.trace)) {
+    publishActivityTrace(convId, runtime);
+  }
+}
+
+function finishActivityTrace(
+  convId: string,
+  status: "completed" | "stopped" | "error",
+): void {
+  const runtime = activityTraceByConversation.get(convId);
+  if (!runtime) return;
+  finishTurnActivityTrace(runtime.trace, status);
+  publishActivityTrace(convId, runtime);
+  activityTraceByConversation.delete(convId);
+}
+
+function onActivityTraceToggle(msg: ChatMessage): void {
+  if (!msg.activityTrace) return;
+  msg.activityTrace = {
+    ...msg.activityTrace,
+    expanded: !msg.activityTrace.expanded,
+  };
+  queueMessagePersist(msg.id, conversationId.value);
+}
+
 function isConversationLoading(convId: string | undefined): boolean {
   return !!convId && loadingConversationIds.value.has(convId);
 }
@@ -1836,11 +1989,19 @@ function transferConversationRuntimeState(fromId: string, toId: string) {
     setConversationThinking(fromId, false);
     setConversationThinking(toId, true);
   }
+  const activity = activityTraceByConversation.get(fromId);
+  if (activity) {
+    activityTraceByConversation.delete(fromId);
+    activityTraceByConversation.set(toId, activity);
+  }
 
   const controller = abortControllersByConversation.get(fromId);
   if (controller) {
     abortControllersByConversation.delete(fromId);
     abortControllersByConversation.set(toId, controller);
+  }
+  if (cancelledConversationIds.delete(fromId)) {
+    cancelledConversationIds.add(toId);
   }
 }
 
@@ -1855,7 +2016,8 @@ const expandedToolCalls = ref<Set<string>>(new Set());
 const toolDebug = ref(false);
 const isTabRecording = ref(false);
 const copiedToolBarKeys = ref<Set<string>>(new Set());
-const cancelled = ref(false);
+/** Cancellation is conversation-scoped; concurrent/off-panel turns must not poison each other. */
+const cancelledConversationIds = new Set<string>();
 const conversationId = ref<string | undefined>(undefined);
 
 const activeBrowserPlanSteps = computed(() =>
@@ -1933,6 +2095,8 @@ type Send2Options = {
   skipUserMessage?: boolean;
   /** MCP 外部任务：用 DomA conversationId 回传结果 */
   mcpConversationId?: string;
+  mcpRequestId?: string;
+  mcpUserMessageId?: string;
 };
 const messagesEl = ref<HTMLElement | null>(null);
 const userBubbleMinimapEl = ref<HTMLElement | null>(null);
@@ -2149,6 +2313,7 @@ function teardownUserBubbleMinimapObserver() {
 
 // 逐条消息串行落盘：保证顺序（避免乱序覆盖），同时不做 debounce
 const messagePersistQueues = new Map<string, Promise<void>>();
+const messagePersistErrors = new Map<string, string>();
 /** 落盘用的会话 id（切 tab 后 conversationId 可能已变，不能只靠面板） */
 const messagePersistConvById = new Map<string, string>();
 
@@ -2217,12 +2382,20 @@ function queueOffPanelAssistantUpsert(
   content: string,
   toolCall?: ChatMessageToolCall,
   customUi?: CustomUI,
+  activityTrace?: TurnActivityTrace,
 ) {
   messagePersistConvById.set(msgId, convId);
   const prev = messagePersistQueues.get(msgId) ?? Promise.resolve();
   const next = prev
     .catch(() => {})
-    .then(() => upsertAssistantMessageInIdb(convId, msgId, content, toolCall, customUi));
+    .then(() => upsertAssistantMessageInIdb(
+      convId,
+      msgId,
+      content,
+      toolCall,
+      customUi,
+      activityTrace,
+    ));
   messagePersistQueues.set(msgId, next);
 }
 
@@ -2232,6 +2405,7 @@ async function upsertAssistantMessageInIdb(
   content: string,
   toolCall?: ChatMessageToolCall,
   customUi?: CustomUI,
+  activityTrace?: TurnActivityTrace,
 ): Promise<void> {
   try {
     const existing = await chatStorage.getMessage(msgId);
@@ -2246,10 +2420,14 @@ async function upsertAssistantMessageInIdb(
       const plainCustomUi = customUi
         ? (JSON.parse(JSON.stringify(customUi)) as Record<string, unknown>)
         : (existing.customUi as Record<string, unknown> | undefined);
+      const plainActivityTrace = activityTrace
+        ? cloneTurnActivityTrace(activityTrace)
+        : existing.activityTrace;
       await chatStorage.updateMessage(msgId, {
         content: newContent,
         ...(toolCalls ? { toolCalls } : {}),
         ...(plainCustomUi ? { customUi: plainCustomUi } : {}),
+        ...(plainActivityTrace ? { activityTrace: plainActivityTrace } : {}),
       });
       return;
     }
@@ -2262,9 +2440,11 @@ async function upsertAssistantMessageInIdb(
       customUi: customUi
         ? (JSON.parse(JSON.stringify(customUi)) as Record<string, unknown>)
         : undefined,
+      activityTrace: activityTrace ? cloneTurnActivityTrace(activityTrace) : undefined,
     });
   } catch (e) {
     console.warn("[Chat] upsertAssistantMessageInIdb failed:", e);
+    messagePersistErrors.set(msgId, e instanceof Error ? e.message : String(e));
   }
 }
 
@@ -2311,6 +2491,9 @@ async function persistMessageNow(messageId: string): Promise<void> {
   const plainToolBarItems = msg.toolBarItems
     ? (JSON.parse(JSON.stringify(msg.toolBarItems)) as any)
     : undefined;
+  const plainActivityTrace = msg.activityTrace
+    ? cloneTurnActivityTrace(msg.activityTrace)
+    : undefined;
   try {
     const ok = await chatStorage.updateMessage(messageId, {
       content: msg.content,
@@ -2321,6 +2504,7 @@ async function persistMessageNow(messageId: string): Promise<void> {
       toolInput: plainToolInputOut,
       toolBarItems: plainToolBarItems,
       toolCalls: plainToolCalls,
+      activityTrace: plainActivityTrace,
     });
     if (!ok) {
       await chatStorage.addMessage({
@@ -2335,10 +2519,12 @@ async function persistMessageNow(messageId: string): Promise<void> {
         toolInput: plainToolInputOut,
         toolBarItems: plainToolBarItems,
         toolCalls: plainToolCalls,
+        activityTrace: plainActivityTrace,
       });
     }
   } catch (e) {
     console.warn("[Chat] Failed to persist message update:", e);
+    messagePersistErrors.set(messageId, e instanceof Error ? e.message : String(e));
   }
 }
 
@@ -2481,6 +2667,8 @@ function onMcpBridgeInbound(msg: McpBridgeInboundMessage) {
     sendText: msg.sendText,
     callerAgent: msg.callerAgent,
     attachments: msg.attachments,
+    targetTabId: msg.targetTabId,
+    targetUrl: msg.targetUrl,
   });
 }
 
@@ -3086,6 +3274,7 @@ let conversationContextStorageListener:
 const showHistory = ref(false);
 const conversations = ref<StoredConversation[]>([]);
 const historySearchQuery = ref("");
+const historyDeleteBusy = ref(false);
 
 // 定时消息
 const showScheduled = ref(false);
@@ -4159,22 +4348,34 @@ async function finalizeOffPanelConversationDone(
   }
 }
 
-/** 从面板或 IDB 收集助手正文（切走后 getMessageById 会空） */
+/** 只读取已持久化的本轮助手结果；读取失败不能报 done。 */
+async function collectMcpResultFromMsgIds(msgIds: string[]): Promise<McpTurnResult> {
+  const persisted = [];
+  for (const id of msgIds) {
+    const persistError = messagePersistErrors.get(id);
+    if (persistError) throw new Error(`DomA 最终消息落盘失败：${persistError}`);
+    const stored = await chatStorage.getMessage(id);
+    if (!stored) throw new Error(`DomA 最终消息未持久化：${id}`);
+    persisted.push(stored);
+  }
+  return assembleMcpTurnResult(persisted);
+}
+
 async function collectAssistantTextFromMsgIds(msgIds: string[]): Promise<string> {
   const parts: string[] = [];
   for (const id of msgIds) {
     const panel = getMessageById(id);
     if (panel) {
-      const c = String(panel.content ?? "").trim();
-      if (c) parts.push(c);
+      const content = String(panel.content ?? "").trim();
+      if (content) parts.push(content);
       continue;
     }
     try {
       const stored = await chatStorage.getMessage(id);
-      const c = String(stored?.content ?? "").trim();
-      if (c) parts.push(c);
+      const content = String(stored?.content ?? "").trim();
+      if (content) parts.push(content);
     } catch {
-      // ignore
+      // Preserve the existing non-MCP scheduled-result behavior.
     }
   }
   return parts.join("\n\n").trim();
@@ -4189,6 +4390,7 @@ function getDebugToolCalls(toolCalls: ChatMessageToolCall[] | undefined): ChatMe
 /** assistant 仅 tool 脚手架（gone、无正文）时不占气泡位，避免 tool 完成后留空行 */
 function isRenderableChatMessage(msg: ChatMessage): boolean {
   if (msg.role === "user") return true;
+  if (msg.activityTrace) return true;
   if (msg.customUi) return true;
   if (msg.toolBarItems?.length) return true;
   if (getDoingToolCalls(msg.toolCalls).length > 0) return true;
@@ -4553,6 +4755,79 @@ const displayMessages = computed<DisplayItem[]>(() => {
   return result;
 });
 
+/** MCP records are collapsed by default; the original messages stay in IDB. */
+const expandedMcpTurns = ref<Set<string>>(new Set());
+const mcpDisplayTurns = computed(() => {
+  const owners = new Map<string, string>();
+  const summaries = new Map<string, string>();
+  let owner = "";
+  for (const item of displayMessages.value) {
+    if (item.type === "message" && item.msg.role === "user") {
+      owner = hasInteractionBlockMcpCallTag(String(item.msg.content ?? "")) ? item.msg.id : "";
+      if (owner) summaries.set(owner, "运行中…");
+    } else if (owner) {
+      owners.set(item.id, owner);
+      if (item.type === "message" && item.msg.role === "assistant" && item.msg.content?.trim()) {
+        const text = item.msg.content.trim().replace(/\s+/g, " ");
+        const preview = text.length > 180 ? `${text.slice(0, 180)}…` : text;
+        summaries.set(owner, `${/[？?]$/.test(text) ? "待用户决定" : "已完成"} · ${preview}`);
+      }
+    }
+  }
+  if (!isConversationLoading(conversationId.value)) {
+    for (const [id, summary] of summaries) {
+      if (summary === "运行中…") summaries.set(id, "暂无可见结果；展开查看失败线索");
+    }
+  }
+  return { owners, summaries };
+});
+
+function isMcpTurnExpanded(id: string): boolean {
+  return expandedMcpTurns.value.has(id);
+}
+function toggleMcpTurn(id: string): void {
+  const next = new Set(expandedMcpTurns.value);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  expandedMcpTurns.value = next;
+}
+function isMcpDisplayItemVisible(item: DisplayItem): boolean {
+  const owner = mcpDisplayTurns.value.owners.get(item.id);
+  return !owner || isMcpTurnExpanded(owner);
+}
+function mcpTurnSummary(id: string): string {
+  const msg = messages.value.find((entry) => entry.id === id);
+  const meta = msg?.toolInput?.mcpTurn;
+  if (meta && typeof meta === "object") {
+    const turn = meta as Record<string, unknown>;
+    const status = turn.status;
+    const preview = typeof turn.summary === "string" ? turn.summary : "";
+    if (status === "error") return `执行失败 · ${preview}`;
+    if (status === "needs_user_input") return `待用户决定 · ${preview}`;
+    if (status === "done") return `已完成 · ${preview}`;
+  }
+  return mcpDisplayTurns.value.summaries.get(id) || "运行中…";
+}
+function mcpTurnTarget(msg: ChatMessage): string {
+  const meta = msg.toolInput?.mcpTurn;
+  if (!meta || typeof meta !== "object") return "";
+  const target = meta as Record<string, unknown>;
+  return [target.targetTitle, target.targetUrl].filter((value) => typeof value === "string" && value).join(" · ");
+}
+
+async function persistMcpTurnStatus(messageId: string, status: string, text: string): Promise<void> {
+  if (!messageId) return;
+  const stored = await chatStorage.getMessage(messageId);
+  if (!stored) return;
+  const current = stored.toolInput?.mcpTurn;
+  const meta = current && typeof current === "object" ? current as Record<string, unknown> : {};
+  const summary = text.trim().replace(/\s+/g, " ").slice(0, 180);
+  const toolInput = { ...stored.toolInput, mcpTurn: { ...meta, status, summary } };
+  await chatStorage.updateMessage(messageId, { toolInput });
+  const panel = getMessageById(messageId);
+  if (panel) panel.toolInput = toolInput;
+}
+
 /**
  * 滚动消息列表到底部。必须对 .chat-messages 自身设 scrollTop：
  * 子节点 scrollIntoView 在 flex+overflow 侧栏里常滚不动外层列表。
@@ -4643,9 +4918,14 @@ function notifySwResetToolAbort(cid: string) {
 
 async function stopTask(
   message?: string | Event,
-  options?: { skipAssistantMessage?: boolean },
+  options?: {
+    skipAssistantMessage?: boolean;
+    conversationId?: string;
+    status?: "stopped" | "error";
+  },
 ) {
-  const cid = conversationId.value;
+  const cid = options?.conversationId ?? conversationId.value;
+  const status = options?.status ?? "stopped";
   try {
     if (cid) abortControllersByConversation.get(cid)?.abort();
   } catch {
@@ -4656,8 +4936,12 @@ async function stopTask(
     abortControllersByConversation.delete(cid);
     setConversationLoading(cid, false);
     setConversationThinking(cid, false);
+    finishActivityTrace(cid, status);
   }
-  cancelled.value = true;
+  if (cid) {
+    if (status === "stopped") cancelledConversationIds.add(cid);
+    else cancelledConversationIds.delete(cid);
+  }
   const msg = typeof message === "string" ? message : undefined;
   if (cid && !options?.skipAssistantMessage) {
     await addMessage(cid, "assistant", msg || t("chat.taskStopped"));
@@ -4714,8 +4998,9 @@ async function abortTask() {
     abortControllersByConversation.delete(cid);
     setConversationLoading(cid, false);
     setConversationThinking(cid, false);
+    finishActivityTrace(cid, "stopped");
   }
-  cancelled.value = true;
+  if (cid) cancelledConversationIds.add(cid);
 }
 
 onMounted(async () => {
@@ -4774,6 +5059,18 @@ onMounted(async () => {
   });
   await loadConfig();
   console.log("[ChatPanel] loadConfig done");
+  if (panelHostTabId != null) {
+    try {
+      const hostTab = await getContext().browser.tabs.get(panelHostTabId);
+      setMcpBridgePanelContext({
+        tabId: panelHostTabId,
+        title: hostTab.title,
+        url: hostTab.url,
+      });
+    } catch (error) {
+      console.warn("[ChatPanel] panel host tab is gone", panelHostTabId, error);
+    }
+  }
   await ensureChatPanelWindowId();
   addListener();
   if (!IS_SAFARI_EXT) {
@@ -4930,12 +5227,15 @@ function reportMcpExternalResult(payload: {
   requestId?: string;
   ok: boolean;
   text: string;
-  status: "done" | "error";
-}): void {
+  status: "done" | "error" | "needs_user_input";
+  sources?: string[];
+  artifacts?: Array<Record<string, string>>;
+}): Promise<boolean> {
   try {
-    sendMcpBridgeResult(payload);
+    return sendMcpBridgeResult(payload);
   } catch (e) {
     console.warn("[ChatPanel] mcpExternalResult send failed", e);
+    return Promise.resolve(false);
   }
 }
 
@@ -5183,6 +5483,13 @@ function addListener() {
   }
   sidePanelRuntimeOnMessageListener = (message, sender, sendResponse) => {
     if (
+      (message?.operate === "chat/scheduledPing" || message?.operate === "chat/scheduledFire")
+      && typeof message?.targetPanelTabId === "number"
+      && message.targetPanelTabId !== panelHostTabId
+    ) {
+      return undefined;
+    }
+    if (
       message?.origin === "background"
       && (message?.operate === "chat/getTabIdByConversationId"
         || message?.operate === "chat/planQuestionsShow"
@@ -5287,6 +5594,7 @@ function addTabListeners() {
   if (!handleTabActivated) {
     handleTabActivated = async (activeInfo) => {
       console.log("[ChatPanel] tabs.onActivated", { activeInfo });
+      if (panelHostTabId != null && activeInfo.tabId !== panelHostTabId) return;
       if (!(await isChatPanelWindow(activeInfo.windowId))) return;
 
       // 截图 brief-activate 等临时切 tab：禁止抢绑面板
@@ -5342,6 +5650,9 @@ function addTabListeners() {
   if (!handleTabUpdated) {
     handleTabUpdated = async (tabId, changeInfo, tab) => {
       console.log("[ChatPanel] tabs.onUpdated", { tabId, changeInfo, tab });
+      if (panelHostTabId != null && tabId === panelHostTabId && (changeInfo.title || changeInfo.url)) {
+        setMcpBridgePanelContext({ tabId: panelHostTabId, title: tab.title, url: tab.url });
+      }
       if (changeInfo.status === "complete") {
         const conversationId = await getConversationIdByTabId(tabId);
         if (!conversationId) return;
@@ -5811,6 +6122,9 @@ async function loadConversation(convId: string | undefined, reason = "unknown") 
       ),
       toolBarItems: (m as any).toolBarItems as ChatMessageToolBarItem[] | undefined,
       toolCalls: m.toolCalls as ChatMessageToolCall[],
+      activityTrace: m.activityTrace
+        ? cloneTurnActivityTrace(m.activityTrace)
+        : undefined,
     }));
     conversationId.value = convId;
 
@@ -5885,27 +6199,29 @@ function formatDomATabGroupTitle(raw: string): string {
   return `${DOMA_TAB_GROUP_TITLE_PREFIX}${title}`;
 }
 
-async function startGroupSession() {
+async function startGroupSession(sourceTabId?: number) {
   try {
     const browser = getContext().browser;
-    const w = await getContext().browser.windows.getLastFocused({ populate: true });
-    const currentTab = w.tabs?.find((t:any) => t.active);
-    // 在同窗口新开一个空白页作为组会话的起点 tab
-    const newTab = await new Promise<any>((resolve, reject) => {
+    // MCP tasks start on the explicitly selected page. Manual/scheduled tasks retain their own new-tab flow.
+    let newTab: any;
+    if (sourceTabId != null) {
+      newTab = await browser.tabs.get(sourceTabId);
+    } else {
+      const w = await browser.windows.getLastFocused({ populate: true });
+      const currentTab = w.tabs?.find((t: any) => t.active);
       const createInfo: any = { active: true };
       if (typeof currentTab?.windowId === 'number') createInfo.windowId = currentTab.windowId;
-      browser.tabs.create(createInfo, (t: any) => {
-        if (browser.runtime.lastError) {
-          reject(new Error(browser.runtime.lastError.message));
-        } else {
-          resolve(t);
-        }
+      newTab = await new Promise<any>((resolve, reject) => {
+        browser.tabs.create(createInfo, (tab: any) => {
+          if (browser.runtime.lastError) reject(new Error(browser.runtime.lastError.message));
+          else resolve(tab);
+        });
       });
-    });
+    }
     const newTabId = typeof newTab?.id === 'number' ? newTab.id : undefined;
     if (newTabId == null) return;
 
-    // 把新空白 tab 放进一个新 group
+    // Create the task group around the selected page (or the manual new tab).
     const groupId = await new Promise<number>((resolve, reject) => {
       browser.tabs.group({ tabIds: [newTabId] }, (gid: number) => {
         if (browser.runtime.lastError) {
@@ -5973,6 +6289,48 @@ async function deleteConversation(convId: string) {
     }
   } catch (e) {
     console.error('[Chat] Failed to delete conversation:', e);
+  }
+}
+
+async function deleteAllHistoryConversations() {
+  if (historyDeleteBusy.value) return;
+  try {
+    const all = await chatStorage.getAllConversations();
+    const targets = all.filter((conv) => getConversationContext(conv.id)?.scheduled !== true);
+    if (!targets.length) return;
+    if (targets.some((conv) => isConversationLoading(conv.id))) {
+      window.alert(t("chat.historyPanel.deleteAllWhileRunning"));
+      return;
+    }
+    if (!window.confirm(t("chat.historyPanel.deleteAllConfirm", { count: targets.length }))) return;
+
+    historyDeleteBusy.value = true;
+    await flushAllMessagePersists();
+
+    for (const conv of targets) {
+      await chatStorage.deleteConversation(conv.id);
+      resetContextUsage(conv.id);
+      llmManager.clearConversation(conv.id);
+      removeConversationContext(conv.id);
+      if (conversationId.value === conv.id) {
+        messages.value = [];
+        conversationId.value = undefined;
+        activeStreamMsgId.value = null;
+      }
+    }
+  } catch (e) {
+    console.error("[Chat] Failed to delete all history conversations:", e);
+    window.alert(t("chat.historyPanel.deleteAllFailed"));
+  } finally {
+    if (historyDeleteBusy.value) {
+      try {
+        await refreshConversationContextList();
+        historySearchQuery.value = "";
+        await refreshHistoryConversations("");
+      } finally {
+        historyDeleteBusy.value = false;
+      }
+    }
   }
 }
 
@@ -6126,6 +6484,7 @@ function upsertAssistantMessage(
   content: string,
   toolCall?: ChatMessageToolCall,
   customUi?: CustomUI,
+  activityTrace?: TurnActivityTrace,
 ) {
   // 非当前面板：不碰 messages，直接串行写 IDB
   if (convId !== conversationId.value) {
@@ -6139,7 +6498,14 @@ function upsertAssistantMessage(
         panelBound: false,
       });
     }
-    queueOffPanelAssistantUpsert(convId, msgId, content, toolCall, customUi);
+    queueOffPanelAssistantUpsert(
+      convId,
+      msgId,
+      content,
+      toolCall,
+      customUi,
+      activityTrace,
+    );
     // Safari 页内把手镜像（Open / 非 Safari 为 noop）
     if (content || toolCall) {
       safariShellOnAssistantUpsert(
@@ -6164,6 +6530,7 @@ function upsertAssistantMessage(
       content: content ? sanitizeAssistantUserFacing(content) : "",
       customUi,
       toolCalls: toolCall ? [toolCall] : [],
+      activityTrace,
     };
     messages.value.push(msg);
     void nextTick(() => scrollToBottom(false));
@@ -6179,6 +6546,7 @@ function upsertAssistantMessage(
       else toolCalls[toolCallIdx] = toolCall;
     }
     if (customUi) msg.customUi = customUi;
+    if (activityTrace) msg.activityTrace = activityTrace;
   }
 
   if (toolCall) {
@@ -6908,7 +7276,6 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
   }
 
   if (typeof userText !== "string" && dockComposer.binding.value.hasPendingUploadFiles) return;
-  cancelled.value = false;
   // MCP 外部任务：normalize 会保留 attachedFiles 等富上下文，只重建 mcpCall 块
   let text: string;
   if (hasInteractionBlockMcpCallTag(rawText)) {
@@ -6988,6 +7355,7 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
 
   const persistConvId = opts?.conversationId ?? conversationId.value!;
   if (!persistConvId) return;
+  cancelledConversationIds.delete(persistConvId);
 
   // 用量触顶：先隐藏总结回合，stash 用户原文，总结后再重放
   if (!opts?.skipSummarizeGate && !opts?.summarizeTurn && !opts?.resend) {
@@ -7027,15 +7395,31 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
 
   const mcpConversationId =
     typeof opts?.mcpConversationId === "string" ? opts.mcpConversationId.trim() : "";
+  const mcpRequestId = typeof opts?.mcpRequestId === "string" ? opts.mcpRequestId.trim() : "";
+  const mcpUserMessageId = typeof opts?.mcpUserMessageId === "string" ? opts.mcpUserMessageId.trim() : "";
   let mcpResultReported = false;
-  const reportMcpOnce = (
+  let mcpReportPending = false;
+  const reportMcpOnce = async (
     ok: boolean,
     text: string,
-    status: "done" | "error",
+    status: "done" | "error" | "needs_user_input",
+    result?: McpTurnResult,
   ) => {
-    if (!mcpConversationId || mcpResultReported) return;
-    mcpResultReported = true;
-    reportMcpExternalResult({ conversationId: mcpConversationId, ok, text, status });
+    if (!mcpConversationId || mcpResultReported || mcpReportPending) return;
+    mcpReportPending = true;
+    try {
+      await persistMcpTurnStatus(mcpUserMessageId, status, text);
+    } catch (error) {
+      console.warn("[ChatPanel] MCP turn status persistence failed", error);
+    }
+    const acknowledged = await reportMcpExternalResult({
+      conversationId: mcpConversationId,
+      ...(mcpRequestId ? { requestId: mcpRequestId } : {}),
+      ok, text, status,
+      ...(result ? { sources: result.sources, artifacts: result.artifacts } : {}),
+    });
+    mcpResultReported = acknowledged;
+    mcpReportPending = false;
   };
 
   if (!isResend && !opts?.skipUserMessage) {
@@ -7098,7 +7482,7 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
       swPingOk: ping.ok,
       swPingMs: ping.elapsedMs,
     });
-    llmManager.sendMessage(
+    await llmManager.sendMessage(
       persistConvId,
       llmSendText, {
       skipAppendUserMessage: isResend,
@@ -7107,6 +7491,7 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
       },
       onTextMessage: (convId, msgId, content) => {
         setConversationThinking(convId, false);
+        completeActivityBeforeAnswer(convId);
         if (convId === conversationId.value) {
           activeStreamMsgId.value = msgId;
         }
@@ -7123,6 +7508,7 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
           toolName: toolCall.function.name,
         });
         setConversationThinking(convId, false);
+        startActivityTool(convId, msgId, toolCall);
         upsertAssistantMessage(convId, msgId, '', {
           id: toolCall.id,
           name: toolCall.function.name,
@@ -7130,6 +7516,7 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
         } as ChatMessageToolCall);
       },
       onToolCallOverride: async (convId, msgId, toolCall, result) => {
+        completeActivityTool(convId, toolCall, result);
         // 只要返回里带了 doma_show_alert 字段，就优先走这个流程（不依赖 truthy）
         if (!!result && typeof result === "object" && "doma_show_alert" in (result as any)) {
           const alert = (result as any).doma_show_alert as { type?: string } | undefined;
@@ -7147,7 +7534,7 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
           } else {
             openProUpgradeActionModal();
           }
-          stopTask();
+          void stopTask(undefined, { conversationId: convId });
         }
         else{
           if (toolCall.function.name === 'browser_find_videos') {
@@ -7157,7 +7544,9 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
             }
 
             if ((result as any).ok && (result as any).count > 0) {
-              stopTask(t("chat.video.selectToDownload", { count: (result as any).count }));
+              void stopTask(t("chat.video.selectToDownload", { count: (result as any).count }), {
+                conversationId: convId,
+              });
             }
             else{
                 return result;
@@ -7170,7 +7559,9 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
             }
 
             if ((result as any).ok && (result as any).userscriptList.length > 0) {
-              stopTask(t("chat.userscript.selectToInstall", { count: (result as any).userscriptList.length }));
+              void stopTask(t("chat.userscript.selectToInstall", { count: (result as any).userscriptList.length }), {
+                conversationId: convId,
+              });
             }
             else{
               return result;
@@ -7185,7 +7576,10 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
             const activatedCount = Array.isArray((result as any).activated) ? (result as any).activated.length : 0;
             const stoppedCount = Array.isArray((result as any).stopped) ? (result as any).stopped.length : 0;
             if ((result as any).ok && activatedCount + stoppedCount > 0) {
-              await stopTask(undefined, { skipAssistantMessage: true });
+              await stopTask(undefined, {
+                skipAssistantMessage: true,
+                conversationId: convId,
+              });
             } else {
               return result;
             }
@@ -7201,7 +7595,10 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
             if (customUI) {
               upsertAssistantMessage(convId, msgId, '', undefined, customUI);
             }
-            await stopTask(undefined, { skipAssistantMessage: true });
+            await stopTask(undefined, {
+              skipAssistantMessage: true,
+              conversationId: convId,
+            });
           }
         }
         
@@ -7227,6 +7624,7 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
           toolCallId: toolCall.id,
           toolName: toolCall.function.name,
         });
+        completeActivityTool(convId, toolCall);
         upsertAssistantMessage(convId, msgId, '', {
           id: toolCall.id,
           name: toolCall.function.name,
@@ -7245,6 +7643,7 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
           activeStreamMsgId.value = msgId;
         }
         if (!isConversationLoading(convId)) return;
+        startActivityTrace(convId, msgId);
         setConversationThinking(convId, true);
       },
       onMessageDone: (convId, msgId) => {
@@ -7259,8 +7658,12 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
       },
       onConversationDone: (convId, msgIds) => {
         console.log("[tool debug] onConversationDone", { convId, msgIds });
-        activeStreamMsgId.value = null;
+        if (activeStreamMsgId.value && msgIds.includes(activeStreamMsgId.value)) {
+          activeStreamMsgId.value = null;
+        }
+        const wasCancelled = cancelledConversationIds.delete(convId);
         const lastMsgId = msgIds[msgIds.length - 1];
+        finishActivityTrace(convId, wasCancelled ? "stopped" : "completed");
         setConversationLoading(convId, false);
         setConversationThinking(convId, false);
         abortControllersByConversation.delete(convId);
@@ -7292,7 +7695,7 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
             toolNames,
             textOnly: toolCallCount === 0,
             msgCount: msgIds.length,
-            cancelled: cancelled.value,
+            cancelled: wasCancelled,
           });
         }
 
@@ -7308,7 +7711,7 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
           } else {
             void flushAllMessagePersists().then(() => clearDoingToolCallsInIdb(msgIds));
           }
-          if (cancelled.value) {
+          if (wasCancelled) {
             reportMcpOnce(false, t("chat.taskStopped"), "error");
             void recordScheduledRunResult(convId, msgIds, "cancelled", t("chat.taskStopped"));
             return;
@@ -7324,12 +7727,14 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
               skipSummarizeGate: true,
               // 总结重放仍属同一 MCP 任务
               ...(mcpConversationId ? { mcpConversationId } : {}),
+              ...(mcpRequestId ? { mcpRequestId } : {}),
+              ...(mcpUserMessageId ? { mcpUserMessageId } : {}),
             }),
           );
           return;
         }
 
-        if (cancelled.value) {
+        if (wasCancelled) {
           reportMcpOnce(false, t("chat.taskStopped"), "error");
           void recordScheduledRunResult(convId, msgIds, "cancelled", t("chat.taskStopped"));
           if (onPanel) {
@@ -7374,9 +7779,19 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
             await finalizeOffPanelConversationDone(convId, msgIds);
           }
 
-          const assistantText = await collectAssistantTextFromMsgIds(msgIds);
-
-          reportMcpOnce(true, assistantText || "（无助手回复）", "done");
+          let assistantText = "";
+          if (mcpConversationId) {
+            try {
+              const result = await collectMcpResultFromMsgIds(msgIds);
+              assistantText = result.text;
+              void reportMcpOnce(result.status !== "error", result.text, result.status, result);
+            } catch (error) {
+              void reportMcpOnce(false, error instanceof Error ? error.message : String(error), "error");
+            }
+          } else {
+            assistantText = await collectAssistantTextFromMsgIds(msgIds);
+          }
+          for (const id of msgIds) messagePersistErrors.delete(id);
           void recordScheduledRunResult(
             convId,
             msgIds,
@@ -7384,9 +7799,50 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
             assistantText || "（无助手回复）",
           );
         };
-        void finishTurn();
+        void finishTurn().catch((error) => {
+          console.warn("[ChatPanel] turn finalization failed", error);
+          void reportMcpOnce(false, error instanceof Error ? error.message : String(error), "error");
+        });
       },
-      onMessageError: async (conversationId, msgId, error) => {
+      onMessageError: async (errorConversationId, msgId, error) => {
+        if (activeStreamMsgId.value === msgId) {
+          activeStreamMsgId.value = null;
+        }
+        setConversationThinking(errorConversationId, false);
+        finishActivityTrace(errorConversationId, "error");
+        const stopErroredConversation = (message: string) =>
+          stopTask(message, {
+            conversationId: errorConversationId,
+            status: "error",
+          });
+        const reportTerminalError = (text: string) => {
+          reportMcpOnce(false, text, "error");
+          void recordScheduledRunResult(
+            errorConversationId,
+            msgId ? [msgId] : [],
+            "error",
+            text,
+          );
+        };
+
+        if (isSseIdleTimeoutError(error)) {
+          const message = t("chat.requestTimeoutRetry");
+          reportTerminalError(message);
+          await stopErroredConversation(message);
+          return;
+        }
+        if (error.name === "EmptyAssistantResponseError") {
+          const message = t("chat.emptyResponseRetry");
+          reportTerminalError(message);
+          await stopErroredConversation(message);
+          return;
+        }
+        if (error.name === "ToolRoundLimitError") {
+          const message = t("chat.toolRoundLimitReached");
+          reportTerminalError(message);
+          await stopErroredConversation(message);
+          return;
+        }
         if (isHttpError(error)) {
           await sendEdition.handleHttpError(
             {
@@ -7395,33 +7851,24 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
               headers: error.headers,
             },
             {
-              conversationId,
+              conversationId: errorConversationId,
               msgId,
               t: (key) => t(key),
-              reportError: (text) => {
-                reportMcpOnce(false, text, "error");
-                void recordScheduledRunResult(
-                  conversationId,
-                  msgId ? [msgId] : [],
-                  "error",
-                  text,
-                );
-              },
-              stopTask,
+              reportError: reportTerminalError,
+              stopTask: stopErroredConversation,
               discardAssistantMessage: async (id) => {
-                await discardAssistantMessageById(conversationId, id);
+                await discardAssistantMessageById(errorConversationId, id);
               },
             },
           );
           return;
         }
-        reportMcpOnce(false, error.message, "error");
-        void recordScheduledRunResult(conversationId, msgId ? [msgId] : [], "error", error.message);
-        stopTask(error.message);
+        reportTerminalError(error.message);
+        await stopErroredConversation(error.message);
       }
     }, abortController.signal, { siteHost: site });
   } catch (e) {
-    if (!cancelled.value) {
+    if (!cancelledConversationIds.has(persistConvId)) {
       await addMessage(
         persistConvId,
         "assistant",
@@ -7941,10 +8388,40 @@ defineExpose({
     background: var(--stay-background);
     border-radius: 12px;
 
+    .history-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 0 4px;
+    }
+
     .history-search {
       position: relative;
-      margin: 0 4px;
+      flex: 1 1 auto;
+      min-width: 0;
       box-sizing: border-box;
+    }
+
+    .history-delete-all-btn {
+      flex: 0 0 auto;
+      height: 36px;
+      padding: 0 12px;
+      border: 1px solid color-mix(in srgb, var(--stay-error, #e74c3c) 55%, var(--stay-border));
+      border-radius: 12px;
+      background: color-mix(in srgb, var(--stay-error, #e74c3c) 10%, var(--stay-backgroundSecondary));
+      color: var(--stay-error);
+      font-size: 12px;
+      cursor: pointer;
+
+      &:hover:not(:disabled) {
+        border-color: color-mix(in srgb, var(--stay-error, #e74c3c) 75%, var(--stay-border));
+        background: color-mix(in srgb, var(--stay-error, #e74c3c) 18%, var(--stay-backgroundSecondary));
+      }
+
+      &:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
     }
 
     .history-search-icon {
@@ -8660,6 +9137,12 @@ defineExpose({
       background: var(--chat-mcp-bubble-bg);
     }
 
+    &.chat-msg--mcp-collapsed .msg-content {
+      max-height: 3.2em;
+      overflow: hidden;
+      overflow-wrap: anywhere;
+    }
+
     &.chat-msg--scheduled {
       background: var(--chat-scheduled-bubble-bg);
     }
@@ -8750,6 +9233,34 @@ defineExpose({
     background: var(--chat-mcp-bubble-bg);
   }
 
+  .mcp-turn-record {
+    min-width: 0;
+    max-width: 100%;
+    margin-top: 8px;
+    font-size: 11px;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+  }
+
+  .mcp-turn-target,
+  .mcp-turn-status {
+    margin-top: 4px;
+  }
+
+  .mcp-turn-target {
+    opacity: 0.7;
+  }
+
+  .mcp-turn-toggle {
+    margin-top: 6px;
+    padding: 2px 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+
   .chat-msg-scheduled-badge {
     background: var(--chat-scheduled-bubble-bg);
   }
@@ -8799,10 +9310,6 @@ defineExpose({
       max-height: 5lh;
     }
   }
-
-    &.thinking {
-      padding: 10px 0;
-    }
 
   .msg-content {
     margin: 0;
@@ -9237,27 +9744,6 @@ defineExpose({
       font-weight: 400;
       color: var(--stay-secondaryFont);
     }
-  }
-
-  .thinking-indicator {
-    display: inline-flex;
-    align-items: center;
-  }
-
-  .thinking-ball {
-    width: 15px;
-    height: 15px;
-    border-radius: 999px;
-    background: var(--stay-black);
-    opacity: 1;
-    transform: scale(0.75);
-    animation: thinking-breathe 1.05s ease-in-out infinite;
-  }
-
-  @keyframes thinking-breathe {
-    0% { transform: scale(0.75); }
-    50% { transform: scale(1); }
-    100% { transform: scale(0.75); }
   }
 
   .loading-dots {

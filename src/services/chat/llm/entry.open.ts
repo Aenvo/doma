@@ -366,7 +366,16 @@ class OpenLlmManager {
       return { type: 'message' as const, content: `错误：未找到 ${this.currentProvider} 服务` };
     }
     // BYOK：不传 Pro 身份头；底层签名仍兼容旧 LlmService
-    service.sendMessage?.(conversationId, '', '', '', '', userMessage, options, signal);
+    return await service.sendMessage(
+      conversationId,
+      '',
+      '',
+      '',
+      '',
+      userMessage,
+      options,
+      signal,
+    );
   }
 
   withdrawLastUserMessage(conversationId: string): void {

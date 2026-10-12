@@ -33,7 +33,7 @@ const CORE_BROWSER_TOOLS: ToolDef[] = [
   // ========== 标签页操作 ==========
   {
     name: 'browser_get_current_tab',
-    description: '获取当前激活的浏览器标签页信息，包括 URL、标题、tab ID。',
+    description: '获取本会话绑定的当前工作网页信息，包括 URL、标题、tab ID。',
     properties: {},
   },
   {

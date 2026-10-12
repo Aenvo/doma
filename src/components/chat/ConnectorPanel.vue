@@ -1,5 +1,5 @@
 <template>
-  <div class="connector-panel">
+  <div ref="connectorRoot" class="connector-panel" :style="maxPanelHeight === null ? undefined : { maxHeight: `${maxPanelHeight}px` }">
     <div class="connector-tabs" role="tablist">
       <button
         type="button"
@@ -40,7 +40,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from "vue";
+import { nextTick, onMounted, onUnmounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import McpProviderPanel from "@/components/chat/McpProviderPanel.vue";
 import CliRunnerPanel from "@/components/chat/CliRunnerPanel.vue";
@@ -57,6 +57,31 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const tab = ref<"mcp" | "cli">("mcp");
+const connectorRoot = ref<HTMLElement | null>(null);
+const maxPanelHeight = ref<number | null>(null);
+let resizeObserver: ResizeObserver | null = null;
+
+function updateMaxPanelHeight() {
+  const root = connectorRoot.value;
+  const composer = root?.closest(".chat-panel")?.querySelector<HTMLElement>(".chat-input-row");
+  if (!root || !composer) return;
+  maxPanelHeight.value = Math.max(0, Math.floor(composer.getBoundingClientRect().top - root.getBoundingClientRect().top - 8));
+}
+
+onMounted(() => {
+  const panel = connectorRoot.value?.closest(".chat-panel");
+  const composer = panel?.querySelector<HTMLElement>(".chat-input-row");
+  resizeObserver = new ResizeObserver(updateMaxPanelHeight);
+  if (panel) resizeObserver.observe(panel);
+  if (composer) resizeObserver.observe(composer);
+  window.addEventListener("resize", updateMaxPanelHeight);
+  void nextTick(updateMaxPanelHeight);
+});
+
+onUnmounted(() => {
+  resizeObserver?.disconnect();
+  window.removeEventListener("resize", updateMaxPanelHeight);
+});
 </script>
 
 <style scoped lang="less">
@@ -64,8 +89,9 @@ const tab = ref<"mcp" | "cli">("mcp");
   display: flex;
   flex-direction: column;
   min-height: 0;
-  /* header 面板外层 overflow:hidden，内容超高时必须在此限高并滚动 */
-  max-height: min(420px, 55vh);
+  /* 在首次测量前保留视口高度回退值。 */
+  max-height: calc(100vh - 320px);
+  max-height: calc(100dvh - 320px);
 }
 
 .connector-tabs {
@@ -98,9 +124,7 @@ const tab = ref<"mcp" | "cli">("mcp");
   flex: 1 1 auto;
   min-height: 0;
   overflow-x: hidden;
-  /* scroll：有溢出时始终露出滚动条，提示还可往下看 */
-  overflow-y: scroll;
-  scrollbar-gutter: stable;
+  overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--stay-black) 35%, transparent)
     color-mix(in srgb, var(--stay-border, #d0d0d0) 55%, transparent);

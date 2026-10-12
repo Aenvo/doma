@@ -1,12 +1,61 @@
 import { parseLlmUsageFromSse, type LlmTokenUsage } from './llm/contextUsage';
 
 export type SseEvent = {
-    type: 'text' | 'tool_call' | 'usage' | 'done';
+    type: 'text' | 'reasoning' | 'tool_call' | 'usage' | 'done';
     content: string;            // 普通文本内容
     toolCalls?: any[];         // 完整的工具调用对象数组
     msgId?: string;            // 消息ID
     usage?: LlmTokenUsage;
+    finishReason?: string;
 };
+
+export const SSE_IDLE_TIMEOUT_MS = 90_000;
+
+export class SseIdleTimeoutError extends Error {
+  readonly timeoutMs: number;
+
+  constructor(timeoutMs = SSE_IDLE_TIMEOUT_MS) {
+    super(`Response stream was idle for ${Math.round(timeoutMs / 1000)} seconds`);
+    this.name = "SseIdleTimeoutError";
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+export function isSseIdleTimeoutError(error: unknown): error is SseIdleTimeoutError {
+  return error instanceof SseIdleTimeoutError ||
+    (error instanceof Error && error.name === "SseIdleTimeoutError");
+}
+
+/** Prevent a half-open SSE connection from leaving the conversation loading forever. */
+export function readStreamChunkWithIdleTimeout(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  timeoutMs = SSE_IDLE_TIMEOUT_MS,
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      void reader.cancel("SSE idle timeout").catch(() => {});
+      reject(new SseIdleTimeoutError(timeoutMs));
+    }, timeoutMs);
+
+    reader.read().then(
+      (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(result);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
 
 /** SSE / fetch 非 2xx 响应；外层可通过 status 或 isHttpError() 识别 */
 export class HttpError extends Error {
@@ -38,8 +87,35 @@ function headersToRecord(headers: Headers): Record<string, string> {
   return out;
 }
 
-function throwHttpError(response: Response): never {
-  throw new HttpError(response.status, undefined, headersToRecord(response.headers));
+async function buildHttpError(response: Response): Promise<HttpError> {
+  let detail = "";
+  try {
+    const raw = (await response.text()).trim();
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw) as {
+          error?: { message?: unknown } | unknown;
+          message?: unknown;
+        };
+        const nested =
+          parsed.error && typeof parsed.error === "object"
+            ? (parsed.error as { message?: unknown }).message
+            : undefined;
+        const message = nested ?? parsed.message;
+        detail = typeof message === "string" ? message.trim() : raw;
+      } catch {
+        detail = raw;
+      }
+    }
+  } catch {
+    // Keep the status-only fallback.
+  }
+  const suffix = detail ? `: ${detail.slice(0, 800)}` : "";
+  return new HttpError(
+    response.status,
+    `HTTP ${response.status}${suffix}`,
+    headersToRecord(response.headers),
+  );
 }
 
 export async function* fetchSSE(
@@ -48,7 +124,10 @@ export async function* fetchSSE(
   msgId: string,
   signal?: AbortSignal,
 ): AsyncGenerator<SseEvent> {
-    console.log("fetchSSE==================", url, options);
+    console.log("fetchSSE==================", url, {
+      method: options.method || "GET",
+      hasBody: options.body != null,
+    });
     let response: Response;
     try {
       response = await fetch(url, {
@@ -65,18 +144,19 @@ export async function* fetchSSE(
       if ((e as any)?.name === "AbortError" || signal?.aborted) return;
       throw e;
     }
-    if (!response.ok) throwHttpError(response);
+    if (!response.ok) throw await buildHttpError(response);
     const reader = response.body?.getReader();
     if (!reader) throw new Error('Response body is not readable');
     const decoder = new TextDecoder();
     const toolCallBufferMap = new Map<number, any>();
     let buffer = '';
+    let finishReason = '';
     while (true) {
         if (signal?.aborted) {
             try { await reader.cancel(); } catch {}
             break;
         }
-        const { done, value } = await reader.read();
+        const { done, value } = await readStreamChunkWithIdleTimeout(reader);
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split(/\r\n|\n/);
@@ -96,7 +176,25 @@ export async function* fetchSSE(
                     if (usage) {
                         yield { type: 'usage', content: '', usage, msgId: msgId };
                     }
-                    const delta = json.choices?.[0]?.delta;
+                    const choice = json.choices?.[0];
+                    const delta = choice?.delta;
+                    if (typeof choice?.finish_reason === 'string') {
+                        finishReason = choice.finish_reason;
+                    }
+                    const reasoningContent =
+                      typeof delta?.reasoning_content === 'string'
+                        ? delta.reasoning_content
+                        : typeof delta?.reasoning === 'string'
+                          ? delta.reasoning
+                          : '';
+                    if (reasoningContent) {
+                        yield {
+                            type: 'reasoning',
+                            content: reasoningContent,
+                            toolCalls: [],
+                            msgId: msgId,
+                        };
+                    }
                     if (delta?.content) {
                         yield { type: 'text', content: delta.content, toolCalls: [], msgId: msgId };
                         // 如果之前有正在进行的工具调用，说明工具调用结束了，先产出工具事件
@@ -115,7 +213,7 @@ export async function* fetchSSE(
                             if (!toolCallBufferMap.has(index)) {
                                 toolCallBufferMap.set(index, {
                                     id: toolCall.id,
-                                    type: toolCall.type,
+                                    type: toolCall.type || 'function',
                                     function: {
                                         name: toolCall.function?.name || '',
                                         arguments: ''
@@ -124,6 +222,12 @@ export async function* fetchSSE(
                             }
                             
                             const currentTool = toolCallBufferMap.get(index);
+                            if (toolCall.id) {
+                                currentTool.id = toolCall.id;
+                            }
+                            if (toolCall.type) {
+                                currentTool.type = toolCall.type;
+                            }
                             if (toolCall.function?.name) {
                                 currentTool.function.name = toolCall.function.name;
                             }
@@ -153,14 +257,23 @@ export async function* fetchSSE(
         toolCallBufferMap.clear();
     }
 
-    yield { type: 'done', content: '', toolCalls: [], msgId: msgId };
+    yield {
+      type: 'done',
+      content: '',
+      toolCalls: [],
+      msgId: msgId,
+      ...(finishReason ? { finishReason } : {}),
+    };
 }
 
 export async function* fetchJSONChunk(
     url: string,
     options: RequestInit
   ): AsyncGenerator<SseEvent> {
-    console.log("fetchJSONChunk==================", url, options);
+    console.log("fetchJSONChunk==================", url, {
+      method: options.method || "GET",
+      hasBody: options.body != null,
+    });
   
     const response = await fetch(url, {
       ...options,
@@ -170,7 +283,7 @@ export async function* fetchJSONChunk(
       },
     });
   
-    if (!response.ok) throwHttpError(response);
+    if (!response.ok) throw await buildHttpError(response);
   
     const reader = response.body?.getReader();
     if (!reader) throw new Error("Response body is not readable");
@@ -182,7 +295,7 @@ export async function* fetchJSONChunk(
     let buffer = "";
   
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await readStreamChunkWithIdleTimeout(reader);
       if (done) break;
   
       buffer += decoder.decode(value, { stream: true });
@@ -211,6 +324,20 @@ export async function* fetchJSONChunk(
         buffer = buffer.slice(last + 1);
   
         const delta = json.choices?.[0]?.delta;
+
+        const reasoningContent =
+          typeof delta?.reasoning_content === "string"
+            ? delta.reasoning_content
+            : typeof delta?.reasoning === "string"
+              ? delta.reasoning
+              : "";
+        if (reasoningContent) {
+          yield {
+            type: "reasoning",
+            content: reasoningContent,
+            toolCalls: [],
+          };
+        }
   
         // =========================
         // 🟢 文本
@@ -243,7 +370,7 @@ export async function* fetchJSONChunk(
             if (!toolCallBufferMap.has(index)) {
               toolCallBufferMap.set(index, {
                 id: toolCall.id,
-                type: toolCall.type,
+                type: toolCall.type || "function",
                 function: {
                   name: "",
                   arguments: "",
@@ -252,6 +379,14 @@ export async function* fetchJSONChunk(
             }
   
             const currentTool = toolCallBufferMap.get(index);
+
+            if (toolCall.id) {
+              currentTool.id = toolCall.id;
+            }
+
+            if (toolCall.type) {
+              currentTool.type = toolCall.type;
+            }
   
             if (toolCall.function?.name) {
               currentTool.function.name = toolCall.function.name;

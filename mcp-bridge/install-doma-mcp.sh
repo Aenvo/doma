@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
-# DomA MCP installer — installs stdio + daemon into ~/.doma/mcp
-# Usage:
-#   curl -fsSL https://res.stayfork.app/d/install-doma-mcp.sh | bash
+# Local installer. With an extension ID, register only the Native Messaging manager.
+# Without an ID, install the local companion for browsers without Native Messaging support.
 set -euo pipefail
 
-BASE_URL="${DOMA_MCP_BASE_URL:-https://res.stayfork.app/d}"
+SOURCE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="${DOMA_MCP_HOME:-$HOME/.doma/mcp}"
-STDIO_URL="${BASE_URL}/doma_mcp_stdio.py"
-DAEMON_URL="${BASE_URL}/doma_bridge_daemon.py"
-
-echo "[DomA] install dir: $INSTALL_DIR"
+MANAGER_DIR="${DOMA_MCP_MANAGER_HOME:-$HOME/.doma/manager}"
+EXTENSION_ID="${1:-}"
 
 # Git Bash / MSYS / MinGW / Cygwin on Windows (uname is e.g. MSYS_NT-10.0-26300)
 is_windows() {
@@ -20,16 +17,6 @@ is_windows() {
     Windows_NT) return 0 ;;
   esac
   return 1
-}
-
-# Native path for Cursor / Windows MCP (Git Bash otherwise prints /c/Users/...)
-to_native_path() {
-  local p="$1"
-  if command -v cygpath >/dev/null 2>&1; then
-    cygpath -w "$p"
-  else
-    echo "$p"
-  fi
 }
 
 python_ok() {
@@ -86,135 +73,61 @@ resolve_python() {
   return 1
 }
 
-have_python() {
-  resolve_python
-}
 
-install_python_macos() {
-  if command -v brew >/dev/null 2>&1; then
-    echo "[DomA] installing Python via Homebrew…"
-    brew install python3
-    return 0
-  fi
-  echo "[DomA] Homebrew not found. Installing Homebrew (may prompt for password)…"
-  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-  # Apple Silicon brew path
-  if [[ -x /opt/homebrew/bin/brew ]]; then
-    eval "$(/opt/homebrew/bin/brew shellenv)"
-  elif [[ -x /usr/local/bin/brew ]]; then
-    eval "$(/usr/local/bin/brew shellenv)"
-  fi
-  brew install python3
-}
-
-install_python_linux() {
-  if command -v apt-get >/dev/null 2>&1; then
-    echo "[DomA] installing Python via apt (may prompt for sudo)…"
-    sudo apt-get update -y
-    sudo apt-get install -y python3
-    return 0
-  fi
-  if command -v dnf >/dev/null 2>&1; then
-    echo "[DomA] installing Python via dnf…"
-    sudo dnf install -y python3
-    return 0
-  fi
-  if command -v yum >/dev/null 2>&1; then
-    echo "[DomA] installing Python via yum…"
-    sudo yum install -y python3
-    return 0
-  fi
-  if command -v pacman >/dev/null 2>&1; then
-    echo "[DomA] installing Python via pacman…"
-    sudo pacman -Sy --noconfirm python
-    return 0
-  fi
-  echo "[DomA] ERROR: no supported package manager. Install Python 3.9+ manually." >&2
-  exit 1
-}
-
-ensure_python() {
-  if have_python; then
-    echo "[DomA] Python OK: $PYTHON_BIN ${PYTHON_PREFIX_ARGS[*]} ($("$PYTHON_BIN" "${PYTHON_PREFIX_ARGS[@]}" -V 2>&1))"
-    return 0
-  fi
+if ! resolve_python; then
+  echo '[DomA] Install Python 3.9 or later before running this installer.' >&2
   if is_windows; then
-    echo "[DomA] ERROR: Python 3.9+ not on PATH in this shell ($(uname -s))." >&2
-    echo "[DomA] Official Windows installer provides 'python' or 'py -3', not always 'python3'." >&2
-    echo "[DomA] Fix: close this terminal, reopen Git Bash from a session where" >&2
-    echo "[DomA]   python -V    or    py -3 -V" >&2
-    echo "[DomA] works, then re-run this installer. Or add Python to PATH and retry." >&2
-    exit 1
+    echo '[DomA] Reopen Git Bash with python or py -3 on PATH, then retry.' >&2
   fi
-  echo "[DomA] Python 3.9+ not found; installing…"
-  case "$(uname -s)" in
-    Darwin) install_python_macos ;;
-    Linux) install_python_linux ;;
-    *)
-      echo "[DomA] ERROR: unsupported OS $(uname -s). Install Python 3.9+ manually." >&2
-      exit 1
-      ;;
-  esac
-  if ! have_python; then
-    echo "[DomA] ERROR: Python still missing after install." >&2
-    exit 1
-  fi
-  echo "[DomA] Python OK: $PYTHON_BIN ${PYTHON_PREFIX_ARGS[*]} ($("$PYTHON_BIN" "${PYTHON_PREFIX_ARGS[@]}" -V 2>&1))"
-}
+  exit 1
+fi
+if [[ -n "$EXTENSION_ID" && ! "$EXTENSION_ID" =~ ^[a-p]{32}$ ]]; then
+  echo '[DomA] Pass a valid 32-character Chrome/Edge extension ID.' >&2
+  exit 1
+fi
+if [[ -n "$EXTENSION_ID" && ( "$INSTALL_DIR" != "$HOME/.doma/mcp" || "$MANAGER_DIR" != "$HOME/.doma/manager" ) ]]; then
+  echo '[DomA] GUI management requires the default ~/.doma directories.' >&2
+  exit 1
+fi
 
-download() {
-  local url="$1"
-  local out="$2"
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$url" -o "$out"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -qO "$out" "$url"
-  else
-    echo "[DomA] ERROR: need curl or wget" >&2
-    exit 1
-  fi
-}
-
-ensure_python
-mkdir -p "$INSTALL_DIR"
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
-
-echo "[DomA] downloading stdio…"
-download "$STDIO_URL" "$TMP/doma_mcp_stdio.py"
-echo "[DomA] downloading daemon…"
-download "$DAEMON_URL" "$TMP/doma_bridge_daemon.py"
-
-# basic sanity
-"$PYTHON_BIN" "${PYTHON_PREFIX_ARGS[@]}" -m py_compile "$TMP/doma_mcp_stdio.py" "$TMP/doma_bridge_daemon.py"
-
-install -m 755 "$TMP/doma_mcp_stdio.py" "$INSTALL_DIR/doma_mcp_stdio.py"
-install -m 755 "$TMP/doma_bridge_daemon.py" "$INSTALL_DIR/doma_bridge_daemon.py"
-
-STDIO_ABS="$(cd "$INSTALL_DIR" && pwd)/doma_mcp_stdio.py"
-STDIO_NATIVE="$(to_native_path "$STDIO_ABS")"
-PY_NATIVE="$(to_native_path "$PYTHON_BIN")"
-
-echo ""
-echo "[DomA] installed successfully."
-echo "[DomA] Paste the following into your MCP client config (e.g. Cursor ~/.cursor/mcp.json):"
-echo ""
-# Machine-readable block for UIs that scrape between markers
-echo "-----BEGIN DOMA_MCP_JSON-----"
-DOMA_MCP_CMD="$PY_NATIVE" DOMA_MCP_STDIO="$STDIO_NATIVE" DOMA_MCP_PREFIX="${PYTHON_PREFIX_ARGS[*]}" \
-"$PYTHON_BIN" "${PYTHON_PREFIX_ARGS[@]}" - <<'PY'
-import json, os
-cmd = os.environ["DOMA_MCP_CMD"]
-stdio = os.environ["DOMA_MCP_STDIO"]
-prefix = [p for p in os.environ.get("DOMA_MCP_PREFIX", "").split() if p]
-print(json.dumps({
-  "mcpServers": {
-    "DomA": {
-      "command": cmd,
-      "args": prefix + [stdio],
-    }
-  }
-}, indent=2, ensure_ascii=False))
+"$PYTHON_BIN" "${PYTHON_PREFIX_ARGS[@]}" - "$SOURCE_DIR" <<'PY'
+import ast, hashlib, json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+release = json.loads((root / 'doma_mcp_release.json').read_text(encoding='utf-8'))
+names = {'bridge_auth.py', 'doma_mcp_stdio.py', 'doma_bridge_daemon.py'}
+if set(release.get('sha256', {})) != names:
+    raise SystemExit('[DomA] Invalid bundled release file list.')
+for name in sorted(names):
+    source = root / name
+    if hashlib.sha256(source.read_bytes()).hexdigest() != release['sha256'][name]:
+        raise SystemExit(f'[DomA] Bundled checksum mismatch: {name}')
+    ast.parse(source.read_text(encoding='utf-8'), filename=name)
+manager = root / 'doma_mcp_manager.py'
+if hashlib.sha256(manager.read_bytes()).hexdigest() != release['managerSha256']:
+    raise SystemExit('[DomA] Bundled manager checksum mismatch.')
+ast.parse(manager.read_text(encoding='utf-8'), filename=manager.name)
 PY
-echo "-----END DOMA_MCP_JSON-----"
-echo ""
+
+if [[ -n "$EXTENSION_ID" ]]; then
+  mkdir -p "$MANAGER_DIR"
+  if [[ -L "$MANAGER_DIR/doma_mcp_manager.py" ]]; then
+    echo '[DomA] Refusing to replace a manager symbolic link.' >&2
+    exit 1
+  fi
+  install -m 755 "$SOURCE_DIR/doma_mcp_manager.py" "$MANAGER_DIR/doma_mcp_manager.py"
+  "$PYTHON_BIN" "${PYTHON_PREFIX_ARGS[@]}" "$MANAGER_DIR/doma_mcp_manager.py" --register "$EXTENSION_ID"
+  echo '[DomA] Local MCP manager registered. Refresh the connector panel, then choose Install companion.'
+  exit 0
+fi
+
+mkdir -p "$INSTALL_DIR"
+for name in bridge_auth.py doma_mcp_stdio.py doma_bridge_daemon.py; do
+  if [[ -L "$INSTALL_DIR/$name" ]]; then
+    echo "[DomA] Refusing to replace a symbolic link: $name" >&2
+    exit 1
+  fi
+done
+install -m 644 "$SOURCE_DIR/bridge_auth.py" "$INSTALL_DIR/bridge_auth.py"
+install -m 755 "$SOURCE_DIR/doma_mcp_stdio.py" "$INSTALL_DIR/doma_mcp_stdio.py"
+install -m 755 "$SOURCE_DIR/doma_bridge_daemon.py" "$INSTALL_DIR/doma_bridge_daemon.py"
+echo '[DomA] Local MCP companion installed. Add its stdio script to your desktop agent configuration.'

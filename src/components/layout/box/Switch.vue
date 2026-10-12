@@ -78,13 +78,13 @@ input, select {
   min-height: 24px;
   &.disabled{
     .slider{
-      background-color: var(--stay-backgroundTertiary);
+      background-color: var(--stay-switch-off, #2F3134);
     }
     .slider:before {
       background-color: var(--stay-white);
     }
     input:checked + .slider{
-      // background-color: var(--s-main);
+      background-color: var(--stay-switch-on, #22c55e);
       opacity: 0.7;
     }
   }
@@ -106,7 +106,7 @@ input, select {
   left: 0;
   right: 0;
   bottom: 0;
-  background-color: var(--stay-backgroundMask);
+  background-color: var(--stay-switch-off, #2F3134);
   transition: .3s;
   border-radius: 21px;
 }
@@ -124,7 +124,7 @@ input, select {
 }
 
 input:checked + .slider {
-  background-color: var(--s-main);
+  background-color: var(--stay-switch-on, #22c55e);
 }
 
 input:checked + .slider:before {

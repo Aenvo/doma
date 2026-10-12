@@ -677,18 +677,36 @@ async function getTabIdByConversationId(conversationId: string): Promise<number 
   }
 
   try {
-    const res = await sendToSidePanel<{ tabId?: number }>({
-      operate: "chat/getTabIdByConversationId",
-      conversationId: id,
-    });
-    const tabId = res?.tabId;
-    const resolved =
-      typeof tabId === "number" && Number.isFinite(tabId) ? tabId : undefined;
-    console.log("[browserTools] getTabIdByConversationId sidepanel", {
-      conversationId: id,
-      tabId: resolved ?? null,
-    });
-    return resolved;
+    try {
+      const res = await sendToSidePanel<{ tabId?: number }>({
+        operate: "chat/getTabIdByConversationId",
+        conversationId: id,
+      });
+      const tabId = res?.tabId;
+      const resolved =
+        typeof tabId === "number" && Number.isFinite(tabId) ? tabId : undefined;
+      console.log("[browserTools] getTabIdByConversationId sidepanel", {
+        conversationId: id,
+        tabId: resolved ?? null,
+      });
+      if (resolved != null) return resolved;
+    } catch (e) {
+      console.warn("[browserTools] sidepanel tab lookup failed; using persisted context:", e);
+    }
+
+    await awaitConversationContextPersistenceReady(replaceConversationMapsFromPersisted);
+    const conversation = getConversationContext(id);
+    if (!conversation) return undefined;
+    if (conversation.mode === "single") return conversation.tabId;
+    if (typeof conversation.groupId === "number" && conversation.groupId >= 0) {
+      const tabs = await getContext().browser.tabs.query({ groupId: conversation.groupId });
+      const active = tabs.find((tab: { active?: boolean; id?: number }) => tab.active && typeof tab.id === "number");
+      if (typeof active?.id === "number") return active.id;
+      if (tabs.some((tab: { id?: number }) => tab.id === conversation.groupWorkingTabId)) {
+        return conversation.groupWorkingTabId;
+      }
+    }
+    return conversation.groupWorkingTabId;
   } catch (e) {
     console.warn("[browserTools] getTabIdByConversationId failed:", e);
     return undefined;
@@ -2453,14 +2471,25 @@ async function compositeSomOnRawViewportInTab(
 
 // ========== 标签页操作 ==========
 
-async function browser_get_current_tab(_args: Record<string, unknown>): Promise<unknown> {
+async function browser_get_current_tab(args: Record<string, unknown>): Promise<unknown> {
   try {
     const browser = getContext().browser;
     let tab: any | undefined;
 
+    const boundTabId = await getTabIdByConversationId(args.conversationId as string);
+    if (boundTabId != null) {
+      try {
+        tab = await browser.tabs.get(boundTabId);
+      } catch {
+        return { error: "conversation page is no longer open" };
+      }
+    }
+
     try {
+      if (!tab) {
       const win = await browser.windows.getLastFocused({ populate: true });
       tab = win?.tabs?.find((t: any) => t?.active && typeof t.id === "number");
+      }
     } catch {
       // fallback
     }
