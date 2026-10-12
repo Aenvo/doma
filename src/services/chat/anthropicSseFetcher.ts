@@ -70,11 +70,11 @@ export async function* fetchAnthropicSSE(
         ...(options.headers || {}),
       },
     });
+    if (!response.ok) throw await buildHttpError(response, signal);
   } catch (e) {
     if ((e as { name?: string })?.name === 'AbortError' || signal?.aborted) return;
     throw e;
   }
-  if (!response.ok) throw await buildHttpError(response);
 
   const reader = response.body?.getReader();
   if (!reader) throw new Error('Response body is not readable');
