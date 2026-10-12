@@ -897,7 +897,8 @@ class ControlHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(403, {"ok": False, "text": "browser Origin forbidden", "status": "error"})
             return False
         expected = f"Bearer {load_or_create_token()}"
-        if not hmac.compare_digest(self.headers.get("Authorization", ""), expected):
+        supplied = self.headers.get("Authorization", "").encode("utf-8")
+        if not hmac.compare_digest(supplied, expected.encode("ascii")):
             self._send_json(401, {"ok": False, "text": "unauthorized", "status": "error"})
             return False
         return True
