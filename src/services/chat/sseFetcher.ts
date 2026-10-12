@@ -90,19 +90,38 @@ function headersToRecord(headers: Headers): Record<string, string> {
   return out;
 }
 
-export async function buildHttpError(response: Response): Promise<HttpError> {
-  let detail = '';
-  try {
-    const raw = (await response.text()).trim();
+export async function buildHttpError(response: Response, signal?: AbortSignal): Promise<HttpError> {
+  let raw = '';
+  const reader = response.body?.getReader();
+  if (reader) {
+    const decoder = new TextDecoder();
+    let bytesRead = 0;
     try {
-      const parsed = JSON.parse(raw);
-      const message = parsed?.error?.message ?? parsed?.message;
-      detail = typeof message === 'string' ? message.trim() : raw;
-    } catch {
-      detail = raw;
+      // Error details are diagnostic snippets, so never consume an unbounded body.
+      while (bytesRead < 4096) {
+        const { done, value } = await readStreamChunkWithIdleTimeout(reader, SSE_IDLE_TIMEOUT_MS, signal);
+        if (done) break;
+        const chunk = value.subarray(0, 4096 - bytesRead);
+        bytesRead += chunk.byteLength;
+        raw += decoder.decode(chunk, { stream: true });
+      }
+      raw += decoder.decode();
+    } catch (error) {
+      if ((error as { name?: string })?.name === 'AbortError' || signal?.aborted) throw error;
+      // A stalled/unreadable error body must not hide its HTTP status and headers.
+    } finally {
+      void reader.cancel().catch(() => {});
+      reader.releaseLock();
     }
+  }
+  let detail = '';
+  raw = raw.trim();
+  try {
+    const parsed = JSON.parse(raw);
+    const message = parsed?.error?.message ?? parsed?.message;
+    detail = typeof message === 'string' ? message.trim() : raw;
   } catch {
-    // A missing/unreadable body still leaves the HTTP status and headers usable.
+    detail = raw;
   }
   return new HttpError(
     response.status,
@@ -133,12 +152,12 @@ export async function* fetchSSE(
           ...options.headers,
         },
       });
+      if (!response.ok) throw await buildHttpError(response, signal);
     } catch (e) {
       // 用户主动取消：视为正常结束，不向上抛错
       if ((e as any)?.name === "AbortError" || signal?.aborted) return;
       throw e;
     }
-    if (!response.ok) throw await buildHttpError(response);
     const reader = response.body?.getReader();
     if (!reader) throw new Error('Response body is not readable');
     const decoder = new TextDecoder();
@@ -261,7 +280,7 @@ export async function* fetchJSONChunk(
       },
     });
   
-    if (!response.ok) throw await buildHttpError(response);
+    if (!response.ok) throw await buildHttpError(response, options.signal ?? undefined);
   
     const reader = response.body?.getReader();
     if (!reader) throw new Error("Response body is not readable");

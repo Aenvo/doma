@@ -144,6 +144,56 @@ try {
     }
   });
 
+  await check('half-open HTTP error bodies retain status/headers after a bounded idle read', async () => {
+    const originalTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = ((callback: (...args: any[]) => void, ms?: number, ...args: any[]) =>
+      originalTimeout(callback, ms === sse.SSE_IDLE_TIMEOUT_MS ? 15 : ms, ...args)) as typeof setTimeout;
+    try {
+      for (const parser of parsers) {
+        const source = streamResponse(['{"error":{"message":"quota'], true);
+        globalThis.fetch = async () => new Response(source.response.body, { status: 429, headers: { 'retry-after': '7' } });
+        await assert.rejects(collect(parser('https://example.test', {}, 'half-open-http')), (error: unknown) => {
+          assert.ok(error instanceof sse.HttpError);
+          assert.equal(error.status, 429);
+          assert.equal(error.headers['retry-after'], '7');
+          return true;
+        });
+        assert.equal(source.wasCancelled(), true);
+      }
+    } finally {
+      globalThis.setTimeout = originalTimeout;
+    }
+  });
+
+  await check('HTTP error body reads respect abort and cap long diagnostic bodies', async () => {
+    for (const parser of parsers) {
+      const source = streamResponse([], true);
+      globalThis.fetch = async () => new Response(source.response.body, { status: 500 });
+      const controller = new AbortController();
+      const events = collect(parser('https://example.test', {}, 'abort-http', controller.signal));
+      setTimeout(() => controller.abort(), 5);
+      let watchdog: ReturnType<typeof setTimeout>;
+      const deadline = new Promise<never>((_, reject) => {
+        watchdog = setTimeout(() => reject(new Error('HTTP error body did not abort within 100ms')), 100);
+      });
+      try {
+        assert.deepEqual(await Promise.race([events, deadline]), []);
+        assert.equal(source.wasCancelled(), true);
+      } finally {
+        clearTimeout(watchdog!);
+        source.finish();
+      }
+      const long = streamResponse(['x'.repeat(8192)], true);
+      globalThis.fetch = async () => new Response(long.response.body, { status: 500 });
+      await assert.rejects(collect(parser('https://example.test', {}, 'long-http')), (error: unknown) => {
+        assert.ok(error instanceof sse.HttpError);
+        assert.equal(error.message, `HTTP 500: ${'x'.repeat(800)}`);
+        return true;
+      });
+      assert.equal(long.wasCancelled(), true);
+    }
+  });
+
   await check('request credentials, URL query and prompt body stay out of fetcher logs', async () => {
     const entries: unknown[][] = [];
     const originalLog = console.log;
