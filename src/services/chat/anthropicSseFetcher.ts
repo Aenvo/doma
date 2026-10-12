@@ -5,13 +5,14 @@
  * tool_call 形状对齐 OpenAI function calling，便于 UI 回调复用。
  */
 import type { LlmTokenUsage } from './llm/contextUsage';
-import { HttpError, type SseEvent } from './sseFetcher';
+import {
+  buildHttpError,
+  readStreamChunkWithIdleTimeout,
+  SSE_IDLE_TIMEOUT_MS,
+  type SseEvent,
+} from './sseFetcher';
 
 const ANTHROPIC_VERSION = '2023-06-01';
-
-function throwHttpError(response: Response): never {
-  throw new HttpError(response.status);
-}
 
 function usageFromAnthropic(raw: unknown): LlmTokenUsage | null {
   if (!raw || typeof raw !== 'object') return null;
@@ -56,6 +57,7 @@ export async function* fetchAnthropicSSE(
   msgId: string,
   signal?: AbortSignal,
 ): AsyncGenerator<SseEvent> {
+  signal = signal ?? options.signal ?? undefined;
   let response: Response;
   try {
     response = await fetch(url, {
@@ -72,18 +74,7 @@ export async function* fetchAnthropicSSE(
     if ((e as { name?: string })?.name === 'AbortError' || signal?.aborted) return;
     throw e;
   }
-  if (!response.ok) {
-    let detail = '';
-    try {
-      detail = (await response.text()).slice(0, 400);
-    } catch {
-      /* ignore */
-    }
-    throw new HttpError(
-      response.status,
-      detail ? `HTTP ${response.status}: ${detail}` : undefined,
-    );
-  }
+  if (!response.ok) throw await buildHttpError(response);
 
   const reader = response.body?.getReader();
   if (!reader) throw new Error('Response body is not readable');
@@ -93,6 +84,7 @@ export async function* fetchAnthropicSSE(
   let buffer = '';
   let eventName = '';
   let stopReason = '';
+  let streamEnded = false;
 
   const flushTools = function* (): Generator<SseEvent> {
     if (toolCallBufferMap.size === 0) return;
@@ -105,18 +97,14 @@ export async function* fetchAnthropicSSE(
     toolCallBufferMap.clear();
   };
 
+  try {
   while (true) {
-    if (signal?.aborted) {
-      try {
-        await reader.cancel();
-      } catch {
-        /* ignore */
-      }
-      break;
+    const { done, value } = await readStreamChunkWithIdleTimeout(reader, SSE_IDLE_TIMEOUT_MS, signal);
+    buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+    if (done) {
+      if (!buffer.trim()) break;
+      buffer += '\n';
     }
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split(/\r\n|\n/);
     buffer = lines.pop() || '';
 
@@ -132,15 +120,18 @@ export async function* fetchAnthropicSSE(
       if (!line.startsWith('data:')) continue;
 
       const dataStr = line.slice(5).trim();
-      if (!dataStr || dataStr === '[DONE]') continue;
+      if (dataStr === '[DONE]') {
+        streamEnded = true;
+        break;
+      }
+      if (!dataStr) continue;
 
       let json: Record<string, unknown>;
       try {
         json = JSON.parse(dataStr) as Record<string, unknown>;
       } catch (e) {
         if ((e as { name?: string })?.name === 'AbortError' || signal?.aborted) return;
-        console.error('[AnthropicSSE] parse error', e);
-        continue;
+        throw e;
       }
 
       const type = (json.type as string) || eventName;
@@ -197,8 +188,18 @@ export async function* fetchAnthropicSSE(
           const err = json.error as { message?: string } | undefined;
           throw new Error(err?.message || 'Anthropic stream error');
         }
+        streamEnded = true;
+        break;
       }
     }
+    if (done || streamEnded) break;
+  }
+  } catch (error) {
+    if ((error as { name?: string })?.name === 'AbortError' || signal?.aborted) return;
+    throw error;
+  } finally {
+    void reader.cancel().catch(() => {});
+    reader.releaseLock();
   }
 
   // tool_use 结束：产出完整 tool_calls（与 OpenAI fetchSSE 末尾 flush 一致）
