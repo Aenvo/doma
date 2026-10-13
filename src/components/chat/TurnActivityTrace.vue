@@ -43,7 +43,7 @@
             ></span>
             <div class="activity-trace__item-content">
               <span v-if="executionUnverified && item.status === 'running'">{{ t('chat.activity.unverified') }} · </span>
-              <span>{{ item.kind === 'reasoning' ? t('chat.activity.reasoning') : item.text }}</span>
+              <span>{{ itemDisplayText(item) }}</span>
               <span v-if="(item.count ?? 1) > 1" class="activity-trace__count"> × {{ item.count }}</span>
               <a
                 v-if="item.url"
@@ -63,7 +63,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useI18n } from "vue-i18n";
-import type { TurnActivityTrace } from "./chatTypes";
+import type { ActivityTraceItem, TurnActivityTrace } from "./chatTypes";
 import ChatChevronForwardSvg from "@/assets/images/chat-chevron-forward.svg";
 
 const props = defineProps<{
@@ -90,6 +90,14 @@ const title = computed(() => {
   const seconds = Math.max(1, Math.round(elapsedMs / 1000));
   return t("chat.activity.completed", { seconds });
 });
+
+function itemDisplayText(item: ActivityTraceItem): string {
+  if (item.kind === "reasoning") return t("chat.activity.reasoning");
+  if (item.status === "error" && item.toolName) {
+    return t("chat.activity.toolFailed", { name: item.toolName.replace(/^browser_/, "").replace(/_/g, " ") });
+  }
+  return item.text;
+}
 
 function displayUrl(value: string): string {
   try {
