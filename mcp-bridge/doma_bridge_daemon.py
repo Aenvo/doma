@@ -33,7 +33,7 @@ from xml.sax.saxutils import escape as xml_escape
 
 from bridge_auth import load_or_create_token
 
-SERVER_VERSION = "0.7.5"
+SERVER_VERSION = "0.7.8"
 BRIDGE_PROTOCOL_VERSION = 1
 CONTROL_PORT = int(os.environ.get("DOMA_CONTROL_PORT", "3846"))
 BRIDGE_PORT = int(os.environ.get("DOMA_BRIDGE_PORT", "3847"))
@@ -194,6 +194,39 @@ def _update_task(conversation_id: str, **fields: Any) -> bool:
         return True
 
 
+def _expire_tasks_locked(now: float) -> None:
+    """Finish expired turns and their request records while holding _TASKS_LOCK."""
+    def expired(record: dict[str, Any]) -> bool:
+        created_at = record.get("createdAt")
+        return (
+            record.get("status") in ("pending", "running")
+            and isinstance(created_at, (int, float))
+            and now - created_at > TASK_TIMEOUT_SEC
+        )
+
+    def finish(record: dict[str, Any]) -> None:
+        text = "DomA 执行超时；请检查侧栏后重试"
+        record.update(status="error", ok=False, text=text, error=text, updatedAt=now)
+        event = record.get("event")
+        if isinstance(event, threading.Event):
+            event.set()
+
+    for rec in _TASKS.values():
+        if not expired(rec):
+            continue
+        finish(rec)
+        req = _REQUESTS.get(rec.get("requestId"))
+        if req and req.get("status") in ("pending", "running"):
+            finish(req)
+    for request_id, req in _REQUESTS.items():
+        if not expired(req):
+            continue
+        finish(req)
+        rec = _TASKS.get(req.get("conversationId"))
+        if rec and rec.get("requestId") == request_id and rec.get("status") in ("pending", "running"):
+            finish(rec)
+
+
 def _extension_connected() -> bool:
     with _CLIENTS_LOCK:
         return len(_CLIENTS) > 0
@@ -247,18 +280,97 @@ def _select_task_client(target_tab_id: int | None) -> tuple[Any | None, dict[str
     return None, _payload(False, "没有可确定目标的 DomA 侧栏，请在目标网页打开 DomA（新侧栏刚打开时可稍后重试）", status="error")
 
 
+def _conversation_client_locked(conversation_id: str) -> Any | None:
+    client = _CONVERSATION_CLIENTS.get(conversation_id)
+    if client in _CLIENTS:
+        return client
+    # A reconnect hello can arrive before the old socket's disconnect cleanup.
+    # Reconsider its explicit claim only after the previous owner has left.
+    for candidate in reversed(_CLIENTS):
+        meta = _CLIENT_META.get(candidate) or {}
+        if meta.get("activeConversationId") == conversation_id:
+            _CONVERSATION_CLIENTS[conversation_id] = candidate
+            _CONVERSATION_TAB_IDS[conversation_id] = meta["tabId"]
+            return candidate
+    tab_id = _CONVERSATION_TAB_IDS.get(conversation_id)
+    if tab_id is not None:
+        for candidate in reversed(_CLIENTS):
+            if (_CLIENT_META.get(candidate) or {}).get("tabId") == tab_id:
+                _CONVERSATION_CLIENTS[conversation_id] = candidate
+                return candidate
+    return None
+
+
 def _conversation_client(conversation_id: str) -> Any | None:
     with _CLIENTS_LOCK:
-        client = _CONVERSATION_CLIENTS.get(conversation_id)
-        if client in _CLIENTS:
-            return client
-        tab_id = _CONVERSATION_TAB_IDS.get(conversation_id)
-        if tab_id is not None:
-            for candidate in reversed(_CLIENTS):
-                if (_CLIENT_META.get(candidate) or {}).get("tabId") == tab_id:
-                    _CONVERSATION_CLIENTS[conversation_id] = candidate
-                    return candidate
-    return None
+        return _conversation_client_locked(conversation_id)
+
+
+def _conversation_connection_state(conversation_id: str) -> dict[str, Any]:
+    with _CLIENTS_LOCK:
+        client = _conversation_client_locked(conversation_id)
+        return {
+            "bridgeConnected": bool(_CLIENTS),
+            "conversationConnected": client is not None,
+            "expectedTabId": _CONVERSATION_TAB_IDS.get(conversation_id),
+            "connectedTabIds": sorted({
+                meta["tabId"] for candidate in _CLIENTS
+                if type((meta := _CLIENT_META.get(candidate) or {}).get("tabId")) is int
+                and meta["tabId"] > 0
+            }),
+        }
+
+
+def _register_client_hello(client: Any, data: dict[str, Any]) -> None:
+    tab_id = data.get("tabId")
+    meta: dict[str, Any] = {}
+    if type(tab_id) is int and tab_id > 0:
+        meta = {
+            "tabId": tab_id,
+            "title": str(data.get("title") or "")[:200],
+            "url": str(data.get("url") or "")[:2048],
+        }
+    active_cid = data.get("activeConversationId")
+    active_cid = active_cid.strip() if isinstance(active_cid, str) else ""
+    if active_cid and "tabId" in meta:
+        meta["activeConversationId"] = active_cid
+    with _CLIENTS_LOCK:
+        if client not in _CLIENTS:
+            return
+        _CLIENT_META[client] = meta
+        if "tabId" not in meta:
+            return
+        # Older clients can still restore the same host tab. Never infer that a
+        # single connected panel owns unrelated conversations with no tab ID.
+        for cid, saved_tab_id in _CONVERSATION_TAB_IDS.items():
+            owner = _CONVERSATION_CLIENTS.get(cid)
+            if saved_tab_id == tab_id and (owner is client or owner not in _CLIENTS):
+                _CONVERSATION_CLIENTS[cid] = client
+        if not active_cid:
+            return
+        owner = _CONVERSATION_CLIENTS.get(active_cid)
+        if owner is not client and owner in _CLIENTS:
+            return
+        # The panel explicitly identifies its currently loaded conversation.
+        # Restore its route without replaying an old task or inventing a result.
+        _CONVERSATION_CLIENTS[active_cid] = client
+        _CONVERSATION_TAB_IDS[active_cid] = tab_id
+        with _TASKS_LOCK:
+            rec = _TASKS.get(active_cid)
+            if rec is None:
+                now = time.time()
+                rec = {
+                    "conversationId": active_cid,
+                    "requestId": None,
+                    "status": "needs_user_input",
+                    "ok": False,
+                    "text": "桥接服务已重新连接，上一回合结果未恢复。请发送新消息继续原会话。",
+                    "createdAt": now,
+                    "updatedAt": now,
+                    "targetTitle": meta["title"],
+                    "targetUrl": meta["url"],
+                }
+                _TASKS[active_cid] = rec
 
 
 def _bind_conversation(request_id: str, conversation_id: str) -> None:
@@ -362,18 +474,20 @@ def dispatch_to_doma(
                 f"请打开 DomA 侧栏并启用「MCP 桥接」（桥端口 {BRIDGE_PORT}）。"
             ),
             "status": "error",
-            "bridgeConnected": False,
+            **(_conversation_connection_state(conversation_id or "")
+               if msg_type != "task" else {"bridgeConnected": False}),
             "attachmentCount": len(attachments),
         }
 
     if msg_type == "task":
         client, target = _select_task_client(target_tab_id)
         if client is None:
-            return target
+            return {**target, "bridgeConnected": _extension_connected()}
     else:
         client = _conversation_client(conversation_id or "")
         if client is None:
-            return _payload(False, "原会话的 DomA 侧栏已断开，请重新打开该网页的侧栏", status="error", bridgeConnected=False)
+            return _payload(False, "原会话的 DomA 侧栏已断开，请重新打开该网页的侧栏",
+                            status="error", **_conversation_connection_state(conversation_id or ""))
         target = {}
 
     payload: dict[str, Any] = {
@@ -411,7 +525,8 @@ def dispatch_to_doma(
             "ok": False,
             "text": "扩展曾连接但发送失败，请重试",
             "status": "error",
-            "bridgeConnected": False,
+            **(_conversation_connection_state(conversation_id or "")
+               if msg_type != "task" else {"bridgeConnected": _extension_connected()}),
         }
     return {
         "ok": True,
@@ -421,7 +536,8 @@ def dispatch_to_doma(
             else "已提交到 DomA，等待扩展创建会话…"
         ),
         "status": "pending",
-        "bridgeConnected": True,
+        **(_conversation_connection_state(conversation_id or "")
+           if msg_type != "task" else {"bridgeConnected": _extension_connected()}),
         "clients": 1,
         "attachmentCount": len(attachments),
     }
@@ -440,7 +556,7 @@ def dispatch_close_to_doma(
                 f"请打开 DomA 侧栏并启用「MCP 桥接」（桥端口 {BRIDGE_PORT}）。"
             ),
             "status": "error",
-            "bridgeConnected": False,
+            **_conversation_connection_state(conversation_id),
         }
 
     payload: dict[str, Any] = {
@@ -451,7 +567,8 @@ def dispatch_close_to_doma(
     }
     client = _conversation_client(conversation_id)
     if client is None:
-        return _payload(False, "原会话的 DomA 侧栏已断开，请重新打开该网页的侧栏", status="error", bridgeConnected=False)
+        return _payload(False, "原会话的 DomA 侧栏已断开，请重新打开该网页的侧栏",
+                        status="error", **_conversation_connection_state(conversation_id))
     with _CLIENTS_LOCK:
         _REQUEST_CLIENTS[request_id] = client
     if not _send_task(client, payload):
@@ -461,14 +578,14 @@ def dispatch_close_to_doma(
             "ok": False,
             "text": "扩展曾连接但发送失败，请重试",
             "status": "error",
-            "bridgeConnected": False,
+            **_conversation_connection_state(conversation_id),
         }
 
     return {
         "ok": True,
         "text": "已提交关闭会话到 DomA，等待扩展确认…",
         "status": "pending",
-        "bridgeConnected": True,
+        **_conversation_connection_state(conversation_id),
         "clients": 1,
     }
 
@@ -586,13 +703,14 @@ def send_conversation_message(
         return _payload(False, "text 不能为空", status="error")
 
     cid = conversation_id.strip()
+    connection = _conversation_connection_state(cid)
     with _TASKS_LOCK:
         current = _TASKS.get(cid)
         if current is None:
-            return _payload(False, f"未知 conversationId: {cid}", conversationId=cid, status="error")
+            return _payload(False, f"未知 conversationId: {cid}", conversationId=cid, status="error", **connection)
         if current.get("status") in ("pending", "running"):
             return _payload(False, "当前回合仍在执行，请先轮询结果", conversationId=cid,
-                            requestId=current.get("requestId"), status="running")
+                            requestId=current.get("requestId"), status="running", **connection)
     normalized: list[dict[str, Any]] = []
     if attachments is not None:
         if not isinstance(attachments, list):
@@ -608,11 +726,14 @@ def send_conversation_message(
     send_text = build_mcp_send_text(text.strip(), caller)
     now = time.time()
     event = threading.Event()
+    with _CLIENTS_LOCK:
+        client = _conversation_client_locked(cid)
+        target = dict(_CLIENT_META.get(client) or {})
     with _TASKS_LOCK:
         previous = _TASKS.get(cid) or {}
         if previous.get("status") in ("pending", "running"):
             return _payload(False, "当前回合仍在执行，请先轮询结果", conversationId=cid,
-                            requestId=previous.get("requestId"), status="running")
+                            requestId=previous.get("requestId"), status="running", **connection)
         _REQUESTS[request_id] = {
             "requestId": request_id,
             "conversationId": cid,
@@ -625,14 +746,16 @@ def send_conversation_message(
             "createdAt": now,
             "updatedAt": now,
             "event": event,
-            "targetTitle": previous.get("targetTitle"),
-            "targetUrl": previous.get("targetUrl"),
+            "targetTitle": target.get("title", previous.get("targetTitle")),
+            "targetUrl": target.get("url", previous.get("targetUrl")),
         }
         _REQUEST_TO_CONVERSATION[request_id] = cid
         _TASKS[cid] = {
             **previous, "conversationId": cid, "requestId": request_id,
             "status": "pending", "ok": False, "text": "等待 DomA 确认消息…",
             "createdAt": now, "updatedAt": now,
+            "targetTitle": _REQUESTS[request_id]["targetTitle"],
+            "targetUrl": _REQUESTS[request_id]["targetUrl"],
         }
 
     try:
@@ -650,9 +773,13 @@ def send_conversation_message(
                 False,
                 str(out.get("text") or "提交失败"),
                 conversationId=cid,
+                requestId=request_id,
                 status="error",
                 callerAgent=caller,
-                bridgeConnected=bool(out.get("bridgeConnected")),
+                **{**_conversation_connection_state(cid), **{
+                    key: out[key] for key in ("bridgeConnected", "conversationConnected", "expectedTabId", "connectedTabIds")
+                    if key in out
+                }},
             )
 
         if not event.wait(BIND_TIMEOUT_SEC):
@@ -661,9 +788,10 @@ def send_conversation_message(
                 False,
                 "等待 DomA 确认消息超时（侧栏未打开或会话不存在）",
                 conversationId=cid,
+                requestId=request_id,
                 status="error",
                 callerAgent=caller,
-                bridgeConnected=True,
+                **_conversation_connection_state(cid),
             )
 
         with _TASKS_LOCK:
@@ -676,9 +804,10 @@ def send_conversation_message(
                 False,
                 str(err or req.get("text") or "发送失败"),
                 conversationId=cid,
+                requestId=request_id,
                 status="error",
                 callerAgent=caller,
-                bridgeConnected=True,
+                **_conversation_connection_state(cid),
             )
 
         if status in ("done", "needs_user_input"):
@@ -691,7 +820,7 @@ def send_conversation_message(
             requestId=request_id,
             status="running",
             callerAgent=caller,
-            bridgeConnected=True,
+            **_conversation_connection_state(cid),
         )
     except Exception as e:
         _fail_request(request_id, f"执行失败: {e}")
@@ -699,8 +828,10 @@ def send_conversation_message(
             False,
             f"执行失败: {e}",
             conversationId=cid,
+            requestId=request_id,
             status="error",
             callerAgent=caller,
+            **_conversation_connection_state(cid),
         )
 
 
@@ -740,9 +871,13 @@ def close_conversation(
                 False,
                 str(out.get("text") or "提交失败"),
                 conversationId=cid,
+                requestId=request_id,
                 status="error",
                 callerAgent=caller,
-                bridgeConnected=bool(out.get("bridgeConnected")),
+                **{**_conversation_connection_state(cid), **{
+                    key: out[key] for key in ("bridgeConnected", "conversationConnected", "expectedTabId", "connectedTabIds")
+                    if key in out
+                }},
             )
 
         if not event.wait(BIND_TIMEOUT_SEC):
@@ -751,9 +886,10 @@ def close_conversation(
                 False,
                 "等待 DomA 关闭会话超时（侧栏未打开或会话不存在）",
                 conversationId=cid,
+                requestId=request_id,
                 status="error",
                 callerAgent=caller,
-                bridgeConnected=True,
+                **_conversation_connection_state(cid),
             )
 
         with _TASKS_LOCK:
@@ -766,9 +902,10 @@ def close_conversation(
                 False,
                 str(err or req.get("text") or "关闭失败"),
                 conversationId=cid,
+                requestId=request_id,
                 status="error",
                 callerAgent=caller,
-                bridgeConnected=True,
+                **_conversation_connection_state(cid),
             )
 
         _update_task(
@@ -781,9 +918,10 @@ def close_conversation(
             True,
             f"会话已关闭（conversationId={cid}）",
             conversationId=cid,
+            requestId=request_id,
             status="done",
             callerAgent=caller,
-            bridgeConnected=True,
+            **_conversation_connection_state(cid),
         )
     except Exception as e:
         _fail_request(request_id, f"执行失败: {e}")
@@ -791,8 +929,10 @@ def close_conversation(
             False,
             f"执行失败: {e}",
             conversationId=cid,
+            requestId=request_id,
             status="error",
             callerAgent=caller,
+            **_conversation_connection_state(cid),
         )
 
 
@@ -800,7 +940,9 @@ def get_conversation_result(conversation_id: Any) -> dict[str, Any]:
     if not isinstance(conversation_id, str) or not conversation_id.strip():
         return _payload(False, "conversationId 不能为空", status="error")
     cid = conversation_id.strip()
+    connection = _conversation_connection_state(cid)
     with _TASKS_LOCK:
+        _expire_tasks_locked(time.time())
         rec = _TASKS.get(cid)
         if rec is None:
             return _payload(
@@ -808,9 +950,8 @@ def get_conversation_result(conversation_id: Any) -> dict[str, Any]:
                 f"未知 conversationId: {cid}",
                 conversationId=cid,
                 status="error",
+                **connection,
             )
-        if rec.get("status") in ("pending", "running") and time.time() - float(rec.get("createdAt") or 0) > TASK_TIMEOUT_SEC:
-            rec.update(status="error", ok=False, text="DomA 执行超时；请检查侧栏后重试", updatedAt=time.time())
         snapshot = dict(rec)
     return _payload(
         bool(snapshot.get("ok")),
@@ -823,7 +964,7 @@ def get_conversation_result(conversation_id: Any) -> dict[str, Any]:
         targetUrl=snapshot.get("targetUrl"),
         sources=snapshot.get("sources") or [],
         artifacts=snapshot.get("artifacts") or [],
-        bridgeConnected=_extension_connected(),
+        **connection,
     )
 
 
@@ -992,27 +1133,7 @@ class BridgeWSHandler(BaseHTTPRequestHandler):
                     continue
                 typ = data.get("type")
                 if typ == "hello":
-                    tab_id = data.get("tabId")
-                    meta: dict[str, Any] = {}
-                    if type(tab_id) is int and tab_id > 0:
-                        meta = {
-                            "tabId": tab_id,
-                            "title": str(data.get("title") or "")[:200],
-                            "url": str(data.get("url") or "")[:2048],
-                        }
-                    with _CLIENTS_LOCK:
-                        _CLIENT_META[self] = meta
-                        tab_id = meta.get("tabId")
-                        if type(tab_id) is int:
-                            for cid, saved_tab_id in _CONVERSATION_TAB_IDS.items():
-                                if saved_tab_id == tab_id:
-                                    _CONVERSATION_CLIENTS[cid] = self
-                        elif len(_CLIENTS) == 1:
-                            # Legacy extension has no host-tab identity. Keep the
-                            # existing single-panel routing semantics on reconnect.
-                            for cid, client in list(_CONVERSATION_CLIENTS.items()):
-                                if client not in _CLIENTS and cid not in _CONVERSATION_TAB_IDS:
-                                    _CONVERSATION_CLIENTS[cid] = self
+                    _register_client_hello(self, data)
                     print("[daemon] hello from extension", file=sys.stderr)
                 elif typ == "keepalive":
                     # Sidepanel keepalive ping; no state change.
@@ -1172,6 +1293,7 @@ class ControlHTTPHandler(BaseHTTPRequestHandler):
 
         if path == "/v1/admin/stop":
             with _TASKS_LOCK:
+                _expire_tasks_locked(time.time())
                 busy = any(rec.get("status") in ("pending", "running") for rec in _TASKS.values()) or any(
                     req.get("status") in ("pending", "running") for req in _REQUESTS.values()
                 )

@@ -7,6 +7,7 @@
  * 回包按 requestId / conversationId 路由到来源 socket。
  */
 import mcpRelease from "../../../mcp-bridge/doma_mcp_release.json";
+import type { ConversationContext } from "./conversationContextStore";
 
 /** MCP bridge WebSocket (paired with control :3846). */
 export const DOMA_MCP_BRIDGE_PORT = 3847;
@@ -62,7 +63,7 @@ export type McpBridgeInboundMessage =
   | McpBridgeCloseMessage;
 
 export type McpBridgeOutboundMessage =
-  | { type: "hello"; role: "extension"; version?: string; tabId?: number; title?: string; url?: string }
+  | { type: "hello"; role: "extension"; version?: string; tabId?: number; title?: string; url?: string; activeConversationId?: string }
   | { type: "accepted"; requestId: string; conversationId: string }
   | { type: "running"; conversationId: string; text?: string }
   | {
@@ -92,6 +93,7 @@ const KEEPALIVE_INTERVAL_MS = 20_000;
 
 let taskHandler: InboundHandler | null = null;
 let panelContext: { tabId?: number; title?: string; url?: string } = {};
+let activeConversationId: string | undefined;
 const pendingResults = new Map<string, {
   message: Extract<McpBridgeOutboundMessage, { type: "result" }>;
   createdAt: number;
@@ -100,55 +102,108 @@ const pendingResults = new Map<string, {
   promise: Promise<boolean>;
 }>();
 let resultRetryTimer: ReturnType<typeof setInterval> | null = null;
-const RESULT_OUTBOX_KEY = "doma:mcp:result-outbox:v1";
+const LEGACY_RESULT_OUTBOX_KEY = "doma:mcp:result-outbox:v1";
+const RESULT_OUTBOX_PREFIX = "doma:mcp:result-outbox:v2:";
 const RESULT_OUTBOX_TTL_MS = 30 * 60 * 1000;
 
-function saveResultOutbox(): void {
+function resultOutboxKey(resultId: string): string {
+  return `${RESULT_OUTBOX_PREFIX}${resultId}`;
+}
+
+function saveResultOutbox(resultId: string): void {
+  const entry = pendingResults.get(resultId);
+  if (!entry) return;
   try {
-    localStorage.setItem(RESULT_OUTBOX_KEY, JSON.stringify([...pendingResults.values()].map(
-      ({ message, createdAt, port }) => ({ message, createdAt, port }),
-    )));
+    const { message, createdAt, port } = entry;
+    // Each result owns one key: another side panel's queue or ACK cannot overwrite it.
+    localStorage.setItem(resultOutboxKey(resultId), JSON.stringify({ message, createdAt, port }));
   } catch (error) {
     console.warn("[bridge] result outbox persistence failed", error);
   }
 }
 
-function loadResultOutbox(): void {
+function removeResultOutbox(resultId: string): void {
   try {
-    const records = JSON.parse(localStorage.getItem(RESULT_OUTBOX_KEY) || "[]");
-    if (!Array.isArray(records)) return;
-    for (const record of records) {
+    localStorage.removeItem(resultOutboxKey(resultId));
+  } catch (error) {
+    console.warn("[bridge] result outbox removal failed", error);
+  }
+}
+
+function migrateLegacyResultOutbox(): void {
+  try {
+    const legacy = localStorage.getItem(LEGACY_RESULT_OUTBOX_KEY);
+    if (legacy) {
+      const records = JSON.parse(legacy);
+      if (Array.isArray(records)) {
+        for (const record of records) {
+          const resultId = record?.message?.resultId;
+          if (typeof resultId !== "string" || !resultId) continue;
+          const key = resultOutboxKey(resultId);
+          if (localStorage.getItem(key) == null) localStorage.setItem(key, JSON.stringify(record));
+        }
+        localStorage.removeItem(LEGACY_RESULT_OUTBOX_KEY);
+      }
+    }
+  } catch (error) {
+    // A malformed/partly migrated legacy snapshot must not block valid v2 records.
+    console.warn("[bridge] legacy result outbox migration failed", error);
+  }
+}
+
+function loadResultOutbox(): void {
+  migrateLegacyResultOutbox();
+  try {
+    const keys: string[] = [];
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (key?.startsWith(RESULT_OUTBOX_PREFIX)) keys.push(key);
+    }
+    for (const key of keys) {
+      const raw = localStorage.getItem(key);
+      if (!raw) continue;
+      let record;
+      try {
+        record = JSON.parse(raw);
+      } catch {
+        continue;
+      }
       const message = record?.message;
       const createdAt = Number(record?.createdAt);
-      if (message?.type !== "result" || typeof message.resultId !== "string" ||
-          !Number.isFinite(createdAt) || Date.now() - createdAt > RESULT_OUTBOX_TTL_MS ||
-          pendingResults.has(message.resultId)) continue;
-      const promise = Promise.resolve(true);
+      if (message?.type !== "result" || typeof message.resultId !== "string" || !message.resultId ||
+          key !== resultOutboxKey(message.resultId) || !Number.isFinite(createdAt)) continue;
+      if (Date.now() - createdAt > RESULT_OUTBOX_TTL_MS) {
+        removeResultOutbox(message.resultId);
+        continue;
+      }
+      if (pendingResults.has(message.resultId)) continue;
+      let resolve!: (acknowledged: boolean) => void;
+      const promise = new Promise<boolean>((done) => { resolve = done; });
       const port = typeof record?.port === "number" && slots.has(record.port)
         ? record.port : DOMA_MCP_BRIDGE_PORT;
       rememberRoute(port, message.requestId, message.conversationId);
-      pendingResults.set(message.resultId, { message, createdAt, port, resolve: () => {}, promise });
+      // Shared records may be replayed by several panels after reload. The daemon's
+      // request/conversation route decides which socket can consume and ACK them;
+      // no record is keyed by mutable panelContext, so switching tabs cannot drop it.
+      pendingResults.set(message.resultId, { message, createdAt, port, resolve, promise });
     }
     if (pendingResults.size && !resultRetryTimer) resultRetryTimer = setInterval(retryPendingResults, 3000);
-    saveResultOutbox();
   } catch (error) {
     console.warn("[bridge] result outbox reload failed", error);
   }
 }
 
 function retryPendingResults(): void {
-  let expired = false;
   for (const [id, entry] of pendingResults) {
     if (Date.now() - entry.createdAt > RESULT_OUTBOX_TTL_MS) {
       pendingResults.delete(id);
+      removeResultOutbox(id);
       entry.resolve(false);
-      expired = true;
       continue;
     }
     const socket = getSlot(entry.port ?? DOMA_MCP_BRIDGE_PORT)?.socket ?? null;
     sendOn(socket, entry.message);
   }
-  if (expired) saveResultOutbox();
   if (!pendingResults.size && resultRetryTimer) {
     clearInterval(resultRetryTimer);
     resultRetryTimer = null;
@@ -159,7 +214,7 @@ function acknowledgeResult(resultId: string): void {
   const entry = pendingResults.get(resultId);
   if (!entry) return;
   pendingResults.delete(resultId);
-  saveResultOutbox();
+  removeResultOutbox(resultId);
   entry.resolve(true);
   if (!pendingResults.size && resultRetryTimer) {
     clearInterval(resultRetryTimer);
@@ -175,10 +230,39 @@ const requestPort = new Map<string, number>();
 const conversationPort = new Map<string, number>();
 
 export function setMcpBridgePanelContext(context: { tabId?: number; title?: string; url?: string }): void {
+  if (context.tabId !== panelContext.tabId) activeConversationId = undefined;
   panelContext = context;
+  sendPanelHello();
+}
+
+/** Claim only the selected conversation whose persisted context owns this panel's tab. */
+export function setMcpBridgeActiveConversation(
+  conversationId: string | undefined,
+  context?: Pick<ConversationContext, "conversationId" | "mode" | "tabId" | "groupId" | "groupTabs">,
+): void {
+  const cid = conversationId?.trim();
+  const tabId = panelContext.tabId;
+  const ownsTab = tabId != null && Number.isInteger(tabId) && tabId > 0 && context && (
+    context.mode === "single" ? context.tabId === tabId :
+      context.mode === "group" && context.groupId != null && Number.isInteger(context.groupId) && context.groupId >= 0 && context.groupTabs?.includes(tabId)
+  );
+  const nextId = cid && context?.conversationId === cid && ownsTab ? cid : undefined;
+  if (activeConversationId === nextId) return;
+  activeConversationId = nextId;
+  sendPanelHello();
+}
+
+function panelHello(): Extract<McpBridgeOutboundMessage, { type: "hello" }> {
+  return {
+    type: "hello", role: "extension", version: mcpRelease.version, ...panelContext,
+    ...(activeConversationId ? { activeConversationId } : {}),
+  };
+}
+
+function sendPanelHello(): void {
   slots.forEach((slot) => {
     if (slot.socket?.readyState === WebSocket.OPEN) {
-      sendOn(slot.socket, { type: "hello", role: "extension", version: mcpRelease.version, ...panelContext });
+      sendOn(slot.socket, panelHello());
     }
   });
 }
@@ -362,7 +446,7 @@ export function sendMcpBridgeResult(payload: {
   let resolve!: (acknowledged: boolean) => void;
   const promise = new Promise<boolean>((done) => { resolve = done; });
   pendingResults.set(resultId, { message, createdAt: Date.now(), port, resolve, promise });
-  saveResultOutbox();
+  saveResultOutbox(resultId);
   retryPendingResults();
   if (!resultRetryTimer) resultRetryTimer = setInterval(retryPendingResults, 3000);
   return promise;
@@ -565,14 +649,7 @@ function tryPort(port: number, generation: number): Promise<WebSocket | null> {
 
     ws.onopen = () => {
       try {
-        ws.send(
-          JSON.stringify({
-            type: "hello",
-            role: "extension",
-            version: mcpRelease.version,
-            ...panelContext,
-          }),
-        );
+        ws.send(JSON.stringify(panelHello()));
       } catch {
         finish(null);
       }

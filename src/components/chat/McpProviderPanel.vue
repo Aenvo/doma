@@ -6,7 +6,7 @@
       <div v-if="supportsNativeManager" class="mcp-manager-card">
         <div class="mcp-manager-heading">
           <strong>{{ t("chat.mcp.managerTitle") }}</strong>
-          <button type="button" class="mcp-copy-btn" :disabled="managerBusy" @click="refreshManager">
+          <button type="button" class="mcp-copy-btn" :disabled="managerBusy || managerChecking" @click="refreshManager">
             {{ t("chat.mcp.refresh") }}
           </button>
         </div>
@@ -35,27 +35,41 @@
             {{ releaseReady === null ? t("chat.mcp.releaseChecking") : releaseReady ? t("chat.mcp.releaseReady") : t("chat.mcp.releaseUnavailable") }}
           </p>
           <div class="mcp-manager-actions">
-            <button v-if="!versionCompatible && !installedVersionNewer" type="button" class="mcp-copy-btn" :disabled="managerBusy || releaseReady !== true || !managerCompatible" @click="runManagerAction('upgrade')">
+            <button v-if="!versionCompatible && !installedVersionNewer" type="button" class="mcp-copy-btn" :disabled="managerBusy || managerChecking || releaseReady !== true || !managerCompatible" @click="runManagerAction('upgrade')">
               {{ managerStatus.installed ? t("chat.mcp.upgrade") : t("chat.mcp.installCompanion") }}
             </button>
-            <button v-if="managerStatus.installed" type="button" class="mcp-copy-btn" :disabled="managerBusy || !managerCompatible" @click="runManagerAction(managerStatus.daemonRunning ? 'stop' : 'start')">
+            <button v-if="managerStatus.installed" type="button" class="mcp-copy-btn" :disabled="managerBusy || managerChecking || !managerCompatible" @click="runManagerAction(managerStatus.daemonRunning ? 'stop' : 'start')">
               {{ managerStatus.daemonRunning ? t("chat.mcp.stopDaemon") : t("chat.mcp.startDaemon") }}
             </button>
-            <button v-if="managerStatus.installed" type="button" class="mcp-copy-btn mcp-manager-remove" :disabled="managerBusy || !managerCompatible" @click="runManagerAction('uninstall')">
+            <button v-if="managerStatus.installed" type="button" class="mcp-copy-btn mcp-manager-remove" :disabled="managerBusy || managerChecking || !managerCompatible" @click="runManagerAction('uninstall')">
               {{ t("chat.mcp.uninstallCompanion") }}
             </button>
           </div>
+          <p v-if="installationNextStep" class="mcp-manager-line" role="status">{{ installationNextStep }}</p>
           <p v-if="uninstallHelpVisible && managerStatus.installed && managerStatus.agentCount > 0" class="mcp-manager-line mcp-manager-warning" role="status">
             {{ t("chat.mcp.uninstallBlockedAgents", { count: managerStatus.agentCount }) }}
           </p>
         </template>
         <template v-else>
-          <p class="mcp-manager-line mcp-manager-warning">{{ t("chat.mcp.managerMissing") }}</p>
+          <p class="mcp-manager-line" :class="{ 'mcp-manager-warning': !!managerFailure }" role="status">
+            {{ managerFailure ? managerFailureMessage(managerFailure) : t("chat.mcp.managerChecking") }}
+          </p>
           <p class="mcp-manager-line" :class="{ 'mcp-manager-warning': releaseReady === false }">
             {{ releaseReady === null ? t("chat.mcp.releaseChecking") : releaseReady ? t("chat.mcp.releaseReady") : t("chat.mcp.releaseUnavailable") }}
           </p>
+          <p v-if="managerFailure" class="mcp-manager-line">{{ t("chat.mcp.managerSetupHint") }}</p>
         </template>
+        <div v-if="!managerStatus || !managerCompatible" class="mcp-manager-actions">
+          <button type="button" class="mcp-copy-btn" aria-live="polite" @click="copyText(installCommand, 'cmd')">
+            <ChatCheckmarkSvg v-if="cmdCopied" class="mcp-copy-check" aria-hidden="true" />
+            {{ cmdCopied ? t("chat.mcp.copiedCmd") : copyFailed === "cmd" ? t("chat.mcp.copyFailed") : t("chat.mcp.copyManagerSetup") }}
+          </button>
+        </div>
         <p v-if="managerError" class="mcp-manager-line mcp-manager-warning">{{ managerError }}</p>
+        <details v-if="managerTechnicalDetails" class="mcp-manager-details">
+          <summary>{{ t("chat.mcp.technicalDetails") }}</summary>
+          <pre class="mcp-code">{{ managerTechnicalDetails }}</pre>
+        </details>
       </div>
 
       <div class="mcp-toggle-row">
@@ -88,10 +102,11 @@
                 : t("chat.mcp.bridgeOff")
           }}
         </span>
-        <span v-if="bridgeEnabled && agentCount > 0" class="mcp-status-agents">
-          {{ t("chat.mcp.agentsConnected", { count: agentCount }) }}
+        <span class="mcp-status-agents" :class="{ disconnected: agentCount === null || agentCount === 0 }">
+          {{ agentCount === null ? t("chat.mcp.agentsUnknown") : t("chat.mcp.agentsConnected", { count: agentCount }) }}
         </span>
       </div>
+      <p v-if="agentCount === 0" class="mcp-hint">{{ t("chat.mcp.noAgentsHint") }}</p>
 
       <div class="mcp-section">
         <div class="mcp-section-title">{{ t("chat.mcp.installTitle") }}</div>
@@ -134,6 +149,7 @@ import { useI18n } from "vue-i18n";
 import { getContext } from "@/services/Context";
 import ChatCheckmarkSvg from "@/assets/images/chat-checkmark.svg";
 import { getMcpManagerStatus, mcpRelease, runMcpManagerOperation, verifyBundledMcpRelease, type McpManagerStatus } from "@/services/chat/mcpManagerClient";
+import { classifyMcpManagerError, type McpManagerFailure } from "@/services/chat/mcpManagerErrors";
 import {
   hasMcpBridgeCopyHintShown,
   isMcpBridgeEnabled,
@@ -178,14 +194,20 @@ const installCommand = !supportsNativeManager
 
 const bridgeEnabled = ref(false);
 const bridgeConnected = ref(false);
-const agentCount = ref(0);
+const agentCount = ref<number | null>(null);
 const toggleBusy = ref(false);
 const cmdCopied = ref(false);
 const cfgCopied = ref(false);
 const codexCopied = ref(false);
 const copyFailed = ref<"cmd" | "cfg" | "codex" | null>(null);
 const managerStatus = ref<McpManagerStatus | null>(null);
+const managerChecking = ref(false);
+const managerFailure = ref<McpManagerFailure | null>(null);
 const managerError = ref("");
+const managerTechnicalError = ref("");
+const managerTechnicalDetails = computed(() =>
+  [managerTechnicalError.value, managerFailure.value?.message].filter(Boolean).join("\n\n"),
+);
 const managerBusy = ref(false);
 const uninstallHelpVisible = ref(false);
 const releaseReady = ref<boolean | null>(null);
@@ -204,6 +226,13 @@ const versionCompatible = computed(() => {
   return !!state?.installed && state.installedVersion === mcpRelease.version &&
     (!state.daemonRunning || state.bridgeProtocolVersion === mcpRelease.bridgeProtocolVersion);
 });
+const installationNextStep = computed(() => {
+  const state = managerStatus.value;
+  if (!state || !managerCompatible.value || installedVersionNewer.value) return "";
+  if (!state.installed) return t("chat.mcp.nextStepInstall");
+  if (!versionCompatible.value) return t("chat.mcp.nextStepUpdate");
+  return t(state.daemonRunning ? "chat.mcp.nextStepRunning" : "chat.mcp.nextStepStart");
+});
 const pythonCommand = computed(() => managerStatus.value?.pythonCommand || (isWindows ? "<absolute-path-to-python.exe>" : "python3"));
 const scriptPath = computed(() => managerStatus.value?.scriptPath || "/absolute/path/to/.doma/mcp/doma_mcp_stdio.py");
 const configJson = computed(() => JSON.stringify({
@@ -216,6 +245,16 @@ let pollTimer: ReturnType<typeof setInterval> | null = null;
 let copyTimer: ReturnType<typeof setTimeout> | null = null;
 let lastEnsureAt = 0;
 const ENSURE_COOLDOWN_MS = 12_000;
+
+function managerFailureMessage(failure: McpManagerFailure): string {
+  const key = {
+    forbidden: "managerForbidden",
+    missing: "managerMissing",
+    timeout: "managerTimeout",
+    failed: "managerCheckFailed",
+  }[failure.kind];
+  return t(`chat.mcp.${key}`, { id: extensionId });
+}
 
 async function loadEnabled() {
   try {
@@ -240,7 +279,6 @@ async function toggleBridgeEnabled() {
       void refreshHealth();
     } else {
       bridgeConnected.value = false;
-      agentCount.value = 0;
     }
   } catch (e) {
     console.warn("[McpPanel] setEnabled failed", e);
@@ -257,34 +295,43 @@ function kickBridgeIfNeeded() {
   emit("bridge-ensure");
 }
 
-async function refreshHealth() {
+async function refreshHealth(afterOperation = false) {
+  if (managerBusy.value && !afterOperation) return;
   if (!supportsNativeManager) {
     bridgeConnected.value = bridgeEnabled.value && isMcpBridgeConnected(DOMA_MCP_BRIDGE_PORT);
-    agentCount.value = 0;
+    agentCount.value = null;
     if (bridgeEnabled.value && !bridgeConnected.value) kickBridgeIfNeeded();
     return;
   }
+  if (managerChecking.value) return;
+  managerChecking.value = true;
   void checkBundledRelease();
   try {
     const data = await getMcpManagerStatus();
     managerStatus.value = data;
-    managerError.value = "";
+    managerFailure.value = null;
     if (data.agentCount === 0) uninstallHelpVisible.value = false;
-    bridgeConnected.value = bridgeEnabled.value && (data.bridgeConnected || isMcpBridgeConnected(DOMA_MCP_BRIDGE_PORT));
-    agentCount.value = bridgeEnabled.value ? data.agentCount : 0;
+    bridgeConnected.value = bridgeEnabled.value && isMcpBridgeConnected(DOMA_MCP_BRIDGE_PORT);
+    agentCount.value = data.agentCount;
     if (bridgeEnabled.value && !bridgeConnected.value) {
       kickBridgeIfNeeded();
     }
   } catch (error) {
     managerStatus.value = null;
-    managerError.value = error instanceof Error ? error.message : String(error);
+    managerFailure.value = classifyMcpManagerError(error);
     bridgeConnected.value = bridgeEnabled.value && isMcpBridgeConnected(DOMA_MCP_BRIDGE_PORT);
-    agentCount.value = 0;
+    agentCount.value = null;
     kickBridgeIfNeeded();
+  } finally {
+    managerChecking.value = false;
   }
 }
 
 async function refreshManager() {
+  if (managerBusy.value || managerChecking.value) return;
+  managerFailure.value = null;
+  managerError.value = "";
+  managerTechnicalError.value = "";
   lastReleaseCheck = 0;
   await refreshHealth();
 }
@@ -300,7 +347,7 @@ async function checkBundledRelease() {
 }
 
 async function runManagerAction(operation: "upgrade" | "start" | "stop" | "uninstall") {
-  if (managerBusy.value) return;
+  if (managerBusy.value || managerChecking.value) return;
   if (operation === "uninstall" && (managerStatus.value?.agentCount ?? 0) > 0) {
     uninstallHelpVisible.value = true;
     return;
@@ -309,24 +356,30 @@ async function runManagerAction(operation: "upgrade" | "start" | "stop" | "unins
   if (confirmation && !window.confirm(t(`chat.mcp.${confirmation}`))) return;
   managerBusy.value = true;
   managerError.value = "";
+  managerTechnicalError.value = "";
+  let operationSucceeded = false;
   try {
     await runMcpManagerOperation(operation);
-    await refreshHealth();
-    if (operation === "upgrade" || operation === "uninstall") {
-      window.alert(t(operation === "upgrade" ? "chat.mcp.upgradeDone" : "chat.mcp.uninstallDone"));
-    }
+    operationSucceeded = true;
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const failure = classifyMcpManagerError(error);
+    const message = failure.message;
     if (operation === "uninstall" && message.includes("desktop agents are still connected")) {
-      await refreshHealth();
       uninstallHelpVisible.value = true;
     } else if ((operation === "stop" || operation === "upgrade") && message.includes("daemon is busy or too old for GUI stop")) {
       managerError.value = t("chat.mcp.stopBlocked");
     } else {
-      managerError.value = message;
+      managerError.value = failure.kind === "failed"
+        ? t("chat.mcp.managerOperationFailed")
+        : managerFailureMessage(failure);
     }
+    managerTechnicalError.value = message;
   } finally {
+    await refreshHealth(true);
     managerBusy.value = false;
+  }
+  if (operationSucceeded && (operation === "upgrade" || operation === "uninstall")) {
+    window.alert(t(operation === "upgrade" ? "chat.mcp.upgradeDone" : "chat.mcp.uninstallDone"));
   }
 }
 
@@ -473,6 +526,19 @@ onUnmounted(() => {
   color: var(--stay-error, #e74c3c);
 }
 
+.mcp-manager-details {
+  margin-top: 8px;
+  color: var(--stay-labelSecondary, #888);
+
+  summary {
+    cursor: pointer;
+  }
+
+  .mcp-code {
+    margin-top: 6px;
+  }
+}
+
 .mcp-manager-actions {
   margin-top: 9px;
 }
@@ -591,6 +657,10 @@ onUnmounted(() => {
   margin-left: auto;
   color: #16a34a;
   font-weight: 600;
+
+  &.disconnected {
+    color: var(--stay-labelSecondary, #888);
+  }
 }
 
 .mcp-section {

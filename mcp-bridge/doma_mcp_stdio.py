@@ -29,7 +29,7 @@ from bridge_auth import load_or_create_token
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "doma"
-SERVER_VERSION = "0.7.5"
+SERVER_VERSION = "0.7.8"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONTROL_PORT = int(os.environ.get("DOMA_CONTROL_PORT", "3846"))
@@ -508,6 +508,8 @@ def handle_request(msg: dict[str, Any]) -> None:
 
 
 def main() -> None:
+    # MCP hosts decode stderr as UTF-8 too, including cold-start logs and errors.
+    sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
     print(
         f"doma MCP stdio client starting (daemon control {CONTROL_BASE}, client={CLIENT_ID})",
         file=sys.stderr,

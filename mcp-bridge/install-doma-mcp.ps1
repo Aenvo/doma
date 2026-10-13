@@ -46,4 +46,4 @@ if ((Test-Path -LiteralPath $managerTarget) -and (Get-Item -LiteralPath $manager
 Copy-Item -LiteralPath $managerSource -Destination $managerTarget -Force
 & $pythonPath $managerTarget --register $ExtensionId
 if ($LASTEXITCODE -ne 0) { throw 'Native Messaging host registration failed.' }
-Write-Host 'Local MCP manager registered. Return to the connector panel, click Refresh, then Install companion.'
+Write-Host 'Local MCP manager registered. Refresh the connector panel and follow the next step shown there.'

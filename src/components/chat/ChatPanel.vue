@@ -953,6 +953,7 @@ import {
   sendMcpBridgeAccepted,
   sendMcpBridgeResult,
   sendMcpBridgeRunning,
+  setMcpBridgeActiveConversation,
   setMcpBridgePanelContext,
   startMcpBridgeClient,
   stopMcpBridgeClient,
@@ -2327,6 +2328,9 @@ function resolveMessageForPersist(
 }
 
 const conversationContextList = ref<ConversationContext[]>([]);
+watch([conversationId, conversationContextList], ([cid]) => {
+  setMcpBridgeActiveConversation(cid, cid ? getConversationContext(cid) : undefined);
+}, { immediate: true });
 let tabInfo: { id?: number; title?: string; url?: string } = {};
 
 /** 从侧栏缓存的会话上下文解析工具目标 tabId（供 BG browserTools 经消息查询）。 */
@@ -6127,6 +6131,8 @@ async function loadConversation(convId: string | undefined, reason = "unknown") 
         : undefined,
     }));
     conversationId.value = convId;
+    // Revalidate group membership even when loading the same conversation ID.
+    setMcpBridgeActiveConversation(convId, getConversationContext(convId));
 
     showHistory.value = false;
 

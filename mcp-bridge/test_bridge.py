@@ -130,6 +130,205 @@ class BridgeAccessTests(unittest.TestCase):
             self.assertTrue(any(task in str(req.get("sendText")) for req in daemon._REQUESTS.values()))
 
 
+class BridgeConversationRecoveryTests(unittest.TestCase):
+    """Exercise routing in memory, without a daemon, socket, or browser."""
+
+    class Client:
+        def __init__(self, fail_send: bool = False):
+            self.messages = []
+            self.fail_send = fail_send
+
+        def send_text(self, raw: str) -> None:
+            if self.fail_send:
+                raise OSError("fixture disconnected")
+            payload = json.loads(raw)
+            self.messages.append(payload)
+            if payload["type"] == "message":
+                daemon._bind_conversation(payload["requestId"], payload["conversationId"])
+
+    def setUp(self) -> None:
+        for name, value in (
+            ("_CLIENTS", []), ("_CLIENT_META", {}), ("_REQUEST_CLIENTS", {}),
+            ("_CONVERSATION_CLIENTS", {}), ("_CONVERSATION_TAB_IDS", {}),
+            ("_TASKS", {}), ("_REQUESTS", {}), ("_REQUEST_TO_CONVERSATION", {}),
+        ):
+            patcher = mock.patch.object(daemon, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def saved(self, cid: str, owner, tab_id: int | None = None) -> None:
+        daemon._CONVERSATION_CLIENTS[cid] = owner
+        if tab_id is not None:
+            daemon._CONVERSATION_TAB_IDS[cid] = tab_id
+        daemon._TASKS[cid] = {"conversationId": cid, "requestId": "previous-turn",
+                              "status": "done", "ok": True, "text": "previous final",
+                              "targetTitle": "Previous page", "targetUrl": "https://example.com/previous"}
+
+    def hello(self, client, tab_id: int | None, cid: str | None = None) -> None:
+        daemon._CLIENTS.append(client)
+        data = {"tabId": tab_id, "title": "Current page", "url": "https://example.com/current"}
+        if cid is not None:
+            data["activeConversationId"] = cid
+        daemon._register_client_hello(client, data)
+
+    def test_same_tab_reconnect_remains_compatible_without_explicit_cid(self) -> None:
+        self.saved("same-tab", self.Client(), 7)
+        current = self.Client()
+        self.hello(current, 7)
+        self.assertIs(daemon._conversation_client("same-tab"), current)
+        self.assertEqual(daemon.get_conversation_result("same-tab")["text"], "previous final")
+        self.assertEqual(current.messages, [])
+
+    def test_explicit_cid_restores_offline_owner_on_new_tab_or_without_saved_tab(self) -> None:
+        for old_tab_id in (7, None):
+            with self.subTest(old_tab_id=old_tab_id):
+                cid = f"offline-{old_tab_id}"
+                self.saved(cid, self.Client(), old_tab_id)
+                current = self.Client()
+                self.hello(current, 8, cid)
+                result = daemon.get_conversation_result(cid)
+                self.assertIs(daemon._conversation_client(cid), current)
+                self.assertEqual(result["expectedTabId"], 8)
+                self.assertEqual(result["targetTitle"], "Previous page")
+                self.assertEqual(result["targetUrl"], "https://example.com/previous")
+                self.assertEqual(result["status"], "done")
+                self.assertEqual(result["text"], "previous final")
+                self.assertEqual(current.messages, [])
+
+    def test_hello_preserves_previous_result_source_and_next_turn_uses_current_page(self) -> None:
+        self.saved("source", self.Client(), 7)
+        current = self.Client()
+        self.hello(current, 8, "source")
+        previous = daemon.get_conversation_result("source")
+        self.assertEqual(previous["targetUrl"], "https://example.com/previous")
+        self.assertEqual(previous["text"], "previous final")
+        sent = daemon.send_conversation_message("source", "Read current title")
+        result = daemon.get_conversation_result("source")
+        self.assertEqual(result["targetTitle"], "Current page")
+        self.assertEqual(result["targetUrl"], "https://example.com/current")
+        self.assertEqual(result["requestId"], sent["requestId"])
+
+    def test_hello_cannot_take_another_live_owner(self) -> None:
+        for new_tab_id in (7, 8):
+            with self.subTest(new_tab_id=new_tab_id):
+                cid = f"live-{new_tab_id}"
+                owner = self.Client()
+                self.hello(owner, 7)
+                self.saved(cid, owner, 7)
+                challenger = self.Client()
+                self.hello(challenger, new_tab_id, cid)
+                self.assertIs(daemon._conversation_client(cid), owner)
+                self.assertEqual(daemon._CONVERSATION_TAB_IDS[cid], 7)
+                self.assertEqual(daemon._TASKS[cid]["text"], "previous final")
+
+    def test_connected_panel_does_not_guess_unrelated_or_unidentified_conversation(self) -> None:
+        for panel_tab_id in (None, 8):
+            with self.subTest(panel_tab_id=panel_tab_id):
+                self.saved("no-tab", self.Client())
+                self.saved("other-tab", self.Client(), 7)
+                current = self.Client()
+                self.hello(current, panel_tab_id)
+                self.assertIsNone(daemon._conversation_client("no-tab"))
+                self.assertIsNone(daemon._conversation_client("other-tab"))
+                self.assertEqual(current.messages, [])
+
+    def test_reconnect_claim_is_reconsidered_after_previous_owner_disconnects(self) -> None:
+        owner = self.Client()
+        self.hello(owner, 7)
+        self.saved("overlap", owner, 7)
+        current = self.Client()
+        self.hello(current, 8, "overlap")
+        self.assertIs(daemon._conversation_client("overlap"), owner)
+        self.assertEqual(daemon._CONVERSATION_TAB_IDS["overlap"], 7)
+        daemon._CLIENTS.remove(owner)
+        daemon._CLIENT_META.pop(owner)
+        result = daemon.get_conversation_result("overlap")
+        self.assertIs(daemon._conversation_client("overlap"), current)
+        self.assertTrue(result["conversationConnected"])
+        self.assertEqual(result["expectedTabId"], 8)
+        self.assertEqual(result["text"], "previous final")
+        self.assertEqual(current.messages, [])
+
+    def test_unknown_cid_is_recovered_only_by_explicit_identified_panel_and_can_continue(self) -> None:
+        current = self.Client()
+        self.hello(current, 8)
+        self.assertEqual(daemon.get_conversation_result("restored")["status"], "error")
+        daemon._register_client_hello(current, {"tabId": 8, "activeConversationId": "restored",
+                                               "title": "Restored page", "url": "https://example.com/"})
+        result = daemon.get_conversation_result("restored")
+        self.assertEqual(result["status"], "needs_user_input")
+        self.assertFalse(result["ok"])
+        self.assertIsNone(result["requestId"])
+        self.assertTrue(result["conversationConnected"])
+        self.assertIn("上一回合结果未恢复", result["text"])
+        self.assertEqual(result["sources"], [])
+        self.assertEqual(result["artifacts"], [])
+        self.assertEqual(current.messages, [])
+        sent = daemon.send_conversation_message("restored", "Read current title", caller_agent="Codex")
+        self.assertEqual(sent["status"], "running")
+        self.assertTrue(sent["conversationConnected"])
+        self.assertEqual(len(current.messages), 1)
+        self.assertEqual(current.messages[0]["conversationId"], "restored")
+        self.assertEqual(current.messages[0]["type"], "message")
+        self.assertEqual(current.messages[0]["requestId"], sent["requestId"])
+
+    def test_withdrawn_reconnect_claim_does_not_route_after_owner_leaves(self) -> None:
+        owner = self.Client()
+        self.hello(owner, 7)
+        self.saved("withdrawn", owner, 7)
+        current = self.Client()
+        self.hello(current, 8, "withdrawn")
+        daemon._register_client_hello(current, {"tabId": 8})
+        daemon._CLIENTS.remove(owner)
+        daemon._CLIENT_META.pop(owner)
+        self.assertFalse(daemon.get_conversation_result("withdrawn")["conversationConnected"])
+        self.assertEqual(current.messages, [])
+
+    def test_explicit_cid_without_valid_host_tab_does_not_create_record(self) -> None:
+        for tab_id in (None, True, 0, "8"):
+            with self.subTest(tab_id=tab_id):
+                current = self.Client()
+                self.hello(current, tab_id, "unidentified")
+                self.assertNotIn("unidentified", daemon._TASKS)
+                self.assertNotIn("unidentified", daemon._CONVERSATION_CLIENTS)
+
+    def test_send_close_and_get_distinguish_global_bridge_from_conversation_route(self) -> None:
+        self.saved("old", self.Client(), 7)
+        self.hello(self.Client(), 8)
+        for action in (
+            lambda: daemon.get_conversation_result("old"),
+            lambda: daemon.send_conversation_message("old", "Read current title"),
+            lambda: daemon.close_conversation("old"),
+        ):
+            result = action()
+            self.assertTrue(result["bridgeConnected"])
+            self.assertFalse(result["conversationConnected"])
+            self.assertEqual(result["expectedTabId"], 7)
+            self.assertEqual(result["connectedTabIds"], [8])
+
+    def test_send_failure_keeps_global_connection_when_another_panel_is_connected(self) -> None:
+        owner = self.Client(fail_send=True)
+        self.hello(owner, 7)
+        self.saved("fails-send", owner, 7)
+        self.hello(self.Client(), 8)
+        with contextlib.redirect_stderr(io.StringIO()):
+            result = daemon.send_conversation_message("fails-send", "Read current title")
+        self.assertEqual(result["status"], "error")
+        self.assertTrue(result["bridgeConnected"])
+        self.assertFalse(result["conversationConnected"])
+        self.assertEqual(result["expectedTabId"], 7)
+        self.assertEqual(result["connectedTabIds"], [8])
+        self.assertTrue(result["requestId"])
+
+    def test_no_connected_panel_reports_both_connections_false(self) -> None:
+        self.saved("offline", self.Client(), 7)
+        result = daemon.send_conversation_message("offline", "Read current title")
+        self.assertFalse(result["bridgeConnected"])
+        self.assertFalse(result["conversationConnected"])
+        self.assertEqual(result["expectedTabId"], 7)
+        self.assertEqual(result["connectedTabIds"], [])
+
+
 class BridgeProtocolTests(unittest.TestCase):
     def test_websocket_terminal_result_is_acknowledged_and_idempotent(self) -> None:
         server = daemon.ThreadingHTTPServer(("127.0.0.1", 0), daemon.BridgeWSHandler)
@@ -210,6 +409,41 @@ class BridgeProtocolTests(unittest.TestCase):
         self.assertEqual(json.loads(result)["task"], "查看中文网页摘要 🌐")
         self.assertEqual(responses[1]["error"]["code"], -32602)
 
+    def test_startup_stderr_is_utf8_with_legacy_windows_console_encoding(self) -> None:
+        startup_error = "模拟启动失败…"
+        script = (
+            "import doma_mcp_stdio as s\n"
+            "def fail_daemon():\n"
+            f"    raise RuntimeError({startup_error!r})\n"
+            "s.ensure_daemon=fail_daemon\n"
+            "s._heartbeat_once=lambda: None\n"
+            "s._heartbeat_loop=lambda: None\n"
+            "s.main()\n"
+        )
+        requests = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2024-11-05", "capabilities": {},
+                "clientInfo": {"name": "test-legacy-stderr", "version": "1.0"}}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        ]
+        payload = "".join(json.dumps(request) + "\n" for request in requests).encode("utf-8")
+        for encoding in ("cp936", "cp1252"):
+            with self.subTest(encoding=encoding):
+                env = {**os.environ, "PYTHONIOENCODING": f"{encoding}:surrogateescape",
+                       "PYTHONDONTWRITEBYTECODE": "1"}
+                env.pop("PYTHONUTF8", None)
+                run = subprocess.run(
+                    [sys.executable, "-c", script], input=payload,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+                    cwd=Path(__file__).parent, timeout=5,
+                )
+                self.assertEqual(run.returncode, 0, run.stderr.decode("utf-8", "replace"))
+                responses = [json.loads(line) for line in run.stdout.splitlines()]
+                self.assertEqual([response["id"] for response in responses], [1, 2])
+                self.assertEqual(responses[0]["result"]["serverInfo"]["name"], "doma")
+                self.assertTrue(responses[1]["result"]["tools"])
+                self.assertIn(startup_error, run.stderr.decode("utf-8", "strict"))
+
     def test_followup_terminal_status_and_duplicate_result_are_idempotent(self) -> None:
         cid = "test-conversation-protocol"
         with daemon._TASKS_LOCK:
@@ -246,11 +480,87 @@ class BridgeProtocolTests(unittest.TestCase):
 
     def test_running_result_expires_with_explicit_error(self) -> None:
         cid = "test-expired-conversation"
-        with daemon._TASKS_LOCK:
-            daemon._TASKS[cid] = {"status": "running", "updatedAt": 1, "createdAt": 1, "text": "running"}
-        result = daemon.get_conversation_result(cid)
-        self.assertEqual(result["status"], "error")
-        self.assertIn("超时", result["text"])
+        rid = "test-expired-request"
+        event = threading.Event()
+        task = {"requestId": rid, "status": "running", "updatedAt": 1, "createdAt": 1, "text": "running"}
+        request = {"conversationId": cid, "status": "running", "createdAt": 1, "event": event}
+        with mock.patch.object(daemon, "_TASKS", {cid: task}), mock.patch.object(daemon, "_REQUESTS", {rid: request}):
+            result = daemon.get_conversation_result(cid)
+            self.assertEqual(result["status"], "error")
+            self.assertIn("超时", result["text"])
+            self.assertEqual(request["status"], "error")
+            self.assertEqual(request["text"], result["text"])
+            self.assertTrue(event.is_set())
+
+    def post_stop(self) -> tuple[int, dict]:
+        with tempfile.TemporaryDirectory(prefix="doma-stop-test-") as temporary, \
+             mock.patch.dict(os.environ, {"DOMA_BRIDGE_TOKEN_FILE": str(Path(temporary) / "token")}):
+            token = bridge_auth.load_or_create_token()
+            server = daemon.ThreadingHTTPServer(("127.0.0.1", 0), daemon.ControlHTTPHandler)
+            server.daemon_threads = True
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            with mock.patch.object(daemon, "CONTROL_PORT", server.server_address[1]):
+                thread.start()
+                connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=2)
+                try:
+                    connection.request("POST", "/v1/admin/stop", body="{}", headers={"Authorization": f"Bearer {token}"})
+                    response = connection.getresponse()
+                    return response.status, json.loads(response.read())
+                finally:
+                    connection.close()
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=2)
+
+    def test_stop_expires_bound_and_unbound_requests_without_polling(self) -> None:
+        event = threading.Event()
+        unbound_event = threading.Event()
+        task = {"conversationId": "expired", "requestId": "bound", "status": "running", "createdAt": 1}
+        requests = {
+            "bound": {"conversationId": "expired", "status": "running", "createdAt": 1, "event": event},
+            "unbound": {"status": "pending", "createdAt": 1, "event": unbound_event},
+        }
+        stop_requested = threading.Event()
+        with mock.patch.object(daemon, "_TASKS", {"expired": task}), mock.patch.object(daemon, "_REQUESTS", requests), \
+             mock.patch.object(daemon, "_STOP_REQUESTED", stop_requested):
+            status, reply = self.post_stop()
+            self.assertEqual(status, 200)
+            self.assertTrue(reply["ok"])
+            self.assertTrue(stop_requested.wait(1))
+            self.assertEqual(task["status"], "error")
+            self.assertTrue(all(req["status"] == "error" for req in requests.values()))
+            self.assertTrue(event.is_set())
+            self.assertTrue(unbound_event.is_set())
+
+    def test_stop_still_refuses_fresh_turn_and_preserves_it_when_old_request_expires(self) -> None:
+        now = time.time()
+        task = {"conversationId": "active", "requestId": "fresh", "status": "running", "createdAt": now}
+        requests = {
+            "old": {"conversationId": "active", "status": "pending", "createdAt": 1},
+            "fresh": {"conversationId": "active", "status": "running", "createdAt": now},
+        }
+        stop_requested = threading.Event()
+        with mock.patch.object(daemon, "_TASKS", {"active": task}), mock.patch.object(daemon, "_REQUESTS", requests), \
+             mock.patch.object(daemon, "_STOP_REQUESTED", stop_requested):
+            status, reply = self.post_stop()
+            self.assertEqual(status, 409)
+            self.assertEqual(reply["status"], "busy")
+            self.assertFalse(stop_requested.is_set())
+            self.assertEqual(requests["old"]["status"], "error")
+            self.assertEqual(requests["fresh"]["status"], "running")
+            self.assertEqual(task["status"], "running")
+
+    def test_stop_refuses_active_records_without_created_at(self) -> None:
+        task = {"requestId": "unknown", "status": "running"}
+        request = {"conversationId": "unknown", "status": "pending"}
+        stop_requested = threading.Event()
+        with mock.patch.object(daemon, "_TASKS", {"unknown": task}), mock.patch.object(daemon, "_REQUESTS", {"unknown": request}), \
+             mock.patch.object(daemon, "_STOP_REQUESTED", stop_requested):
+            status, _ = self.post_stop()
+            self.assertEqual(status, 409)
+            self.assertFalse(stop_requested.is_set())
+            self.assertEqual(task["status"], "running")
+            self.assertEqual(request["status"], "pending")
 
     def test_empty_done_and_cancel_are_errors(self) -> None:
         for cid, incoming in (

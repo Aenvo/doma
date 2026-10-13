@@ -116,7 +116,7 @@ if [[ -n "$EXTENSION_ID" ]]; then
   fi
   install -m 755 "$SOURCE_DIR/doma_mcp_manager.py" "$MANAGER_DIR/doma_mcp_manager.py"
   "$PYTHON_BIN" "${PYTHON_PREFIX_ARGS[@]}" "$MANAGER_DIR/doma_mcp_manager.py" --register "$EXTENSION_ID"
-  echo '[DomA] Local MCP manager registered. Refresh the connector panel, then choose Install companion.'
+  echo '[DomA] Local MCP manager registered. Refresh the connector panel and follow the next step shown there.'
   exit 0
 fi
 

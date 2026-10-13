@@ -85,7 +85,15 @@ class ManagerTests(unittest.TestCase):
     def test_windows_launcher_starts_without_output_or_side_effects(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             launcher = Path(temporary) / "manager.cmd"
-            script = HERE / "doma_mcp_manager.py"
+            script = Path(temporary) / "manager_fixture.py"
+            script.write_text(
+                "import sys\n"
+                f"sys.path.insert(0, {str(HERE)!r})\n"
+                "import doma_mcp_manager as manager\n"
+                "manager.status = lambda: {'ok': True, 'managerVersion': manager.MANAGER_VERSION}\n"
+                "manager.main()\n",
+                encoding="utf-8",
+            )
             content = manager.windows_launcher_bytes(Path(sys.executable), script)
             self.assertNotIn(b"\n", content.replace(b"\r\n", b""))
             launcher.write_bytes(content)
@@ -95,6 +103,7 @@ class ManagerTests(unittest.TestCase):
                 input=struct.pack("=I", len(request)) + request,
                 capture_output=True,
                 timeout=5,
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
             )
             self.assertEqual(result.returncode, 0)
             size = struct.unpack("=I", result.stdout[:4])[0]
@@ -147,7 +156,7 @@ class ManagerTests(unittest.TestCase):
             running = {"daemonRunning": True, "controlPortOccupied": True, "agentCount": 0}
             stopped = {"daemonRunning": False, "controlPortOccupied": False, "agentCount": 0}
             with patch.object(manager, "MCP_HOME", root), patch.object(manager, "RELEASE_FILE", root / "release.json"), \
-                 patch.object(manager, "status", side_effect=[running, stopped]), \
+                 patch.object(manager, "status", side_effect=[running, stopped, {"daemonVersion": "0.6.2"}]), \
                  patch.object(manager, "_stop_daemon"), \
                  patch.object(manager, "_start_daemon", side_effect=[RuntimeError("start failed"), None]):
                 with self.assertRaisesRegex(RuntimeError, "start failed"):
@@ -156,6 +165,41 @@ class ManagerTests(unittest.TestCase):
             for name, data in previous.items():
                 self.assertEqual((root / name).read_bytes(), data)
             self.assertEqual((root / "release.json").read_text(encoding="utf-8"), old_release)
+            self.assertFalse(any(root.glob("doma-mcp-upgrade-*")))
+
+    def test_upgrade_preserves_backups_when_rollback_fails(self) -> None:
+        for failure in ("replace", "verification", "daemon-version"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                previous = {name: ("# old " + name + "\n").encode() for name in manager.MANAGED_FILES}
+                previous["release.json"] = b'{"version":"0.6.2"}\n'
+                for name, data in previous.items():
+                    (root / name).write_bytes(data)
+                newer = {name: "# new " + name + "\n" for name in manager.MANAGED_FILES}
+                hashes = {name: hashlib.sha256(source.encode()).hexdigest() for name, source in newer.items()}
+                replace = os.replace
+
+                def replace_with_failure(source, destination):
+                    restoring = Path(source).name.startswith("restore-")
+                    if restoring and failure == "replace":
+                        raise PermissionError("fixture restore denied")
+                    replace(source, destination)
+                    if restoring and failure == "verification":
+                        Path(destination).write_bytes(b"fixture corrupted restored file")
+
+                states = [{"daemonRunning": True}, {"daemonRunning": False}, {"daemonVersion": "0.0.0"}]
+                with patch.object(manager, "MCP_HOME", root), patch.object(manager, "RELEASE_FILE", root / "release.json"), \
+                     patch.object(manager, "status", side_effect=states), patch.object(manager, "_stop_daemon"), \
+                     patch.object(manager, "_start_daemon", side_effect=[RuntimeError("new daemon failed"), None]), \
+                     patch.object(manager.os, "replace", side_effect=replace_with_failure):
+                    with self.assertRaisesRegex(RuntimeError, "rollback needs repair") as caught:
+                        manager.upgrade({"version": "0.7.0", "sha256": hashes, "files": newer})
+                stages = list(root.glob("doma-mcp-upgrade-*"))
+                self.assertEqual(len(stages), 1)
+                recovery = stages[0] / "previous"
+                self.assertIn(str(recovery), str(caught.exception))
+                for name, data in previous.items():
+                    self.assertEqual((recovery / name).read_bytes(), data)
 
     def test_stop_refuses_unknown_process_on_control_port(self) -> None:
         with patch.object(manager, "status", return_value={"daemonRunning": False, "controlPortOccupied": True}):
@@ -213,6 +257,7 @@ class ManagerTests(unittest.TestCase):
                                           "files": {name: data.decode() for name, data in content.items()}})
                 self.assertTrue(result["ok"])
                 self.assertEqual(manager._installed_version(), "0.7.0")
+                self.assertFalse(any(root.glob("doma-mcp-upgrade-*")))
                 (root / "bridge-auth-token").write_text("token", encoding="utf-8")
                 removed = manager.uninstall()
                 self.assertTrue(removed["ok"])

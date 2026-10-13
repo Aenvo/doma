@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 
-MANAGER_VERSION = "1.1.1"
+MANAGER_VERSION = "1.1.2"
 HOST_NAME = "app.stayfork.doma_mcp_manager"
 MANAGED_FILES = ("bridge_auth.py", "doma_mcp_stdio.py", "doma_bridge_daemon.py")
 CONTROL_PORT = 3846
@@ -207,8 +207,9 @@ def upgrade(request: dict[str, Any]) -> dict[str, Any]:
         path = MCP_HOME / name
         if path.is_symlink():
             raise RuntimeError(f"refusing to replace symbolic link: {name}")
-    with tempfile.TemporaryDirectory(prefix="doma-mcp-upgrade-", dir=MCP_HOME) as temporary:
-        stage = Path(temporary)
+    stage = Path(tempfile.mkdtemp(prefix="doma-mcp-upgrade-", dir=MCP_HOME))
+    keep_recovery = False
+    try:
         for name in MANAGED_FILES:
             _stage_verified(name, hashes[name], files[name], stage / name)
         # Syntax validation before stopping a working daemon.
@@ -222,9 +223,13 @@ def upgrade(request: dict[str, Any]) -> dict[str, Any]:
             if path.exists():
                 shutil.copy2(path, backups / name)
 
-        was_running = status()["daemonRunning"]
+        previous_status = status()
+        was_running = previous_status["daemonRunning"]
+        previous_daemon_version = previous_status.get("daemonVersion") or current
         _stop_daemon()
         replaced: list[str] = []
+        # Keep the saved release until replacement or rollback has been verified.
+        keep_recovery = True
         try:
             for name in MANAGED_FILES:
                 os.replace(stage / name, MCP_HOME / name)
@@ -244,16 +249,29 @@ def upgrade(request: dict[str, Any]) -> dict[str, Any]:
                 for name in reversed(replaced):
                     old = backups / name
                     if old.exists():
-                        os.replace(old, MCP_HOME / name)
+                        restored = stage / f"restore-{name}"
+                        shutil.copy2(old, restored)
+                        os.replace(restored, MCP_HOME / name)
+                        if (MCP_HOME / name).read_bytes() != old.read_bytes():
+                            raise RuntimeError(f"restored file verification failed: {name}")
                     else:
                         (MCP_HOME / name).unlink(missing_ok=True)
                 if was_running:
                     _start_daemon()
+                    if previous_daemon_version and status()["daemonVersion"] != previous_daemon_version:
+                        raise RuntimeError("restored daemon reported a different version")
+                keep_recovery = False
             except Exception as rollback_error:
                 raise RuntimeError(
-                    f"upgrade failed ({upgrade_error}); rollback needs repair: {rollback_error}"
+                    f"upgrade failed ({upgrade_error}); rollback needs repair: {rollback_error}; "
+                    f"recovery backup directory: {backups}"
                 ) from rollback_error
             raise
+        else:
+            keep_recovery = False
+    finally:
+        if not keep_recovery:
+            shutil.rmtree(stage)
     return {"ok": True, "installedVersion": target, "restartAgentRequired": True}
 
 
