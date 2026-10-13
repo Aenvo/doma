@@ -44,66 +44,121 @@ const NOISY_KEYS = new Set([
   'durationMs',
 ]);
 
-function normalizeForFingerprint(
-  value: unknown,
-  depth = 0,
-  seen = new WeakSet<object>(),
-): unknown {
-  if (value == null || typeof value === 'boolean' || typeof value === 'number') {
-    return value;
-  }
-  if (typeof value === 'string') {
-    if (value.length <= 512) return value;
-    return `${value.slice(0, 256)}...[length:${value.length}]`;
-  }
-  if (typeof value !== 'object') return String(value);
-  if (seen.has(value)) return '[circular]';
-  seen.add(value);
-
-  if (Array.isArray(value)) {
-    const normalized = value
-      .slice(0, 24)
-      .map((item) => normalizeForFingerprint(item, depth + 1, seen));
-    if (value.length > 24) normalized.push(`[remaining:${value.length - 24}]`);
-    return normalized;
-  }
-
-  if (depth >= 6) return '[max-depth]';
-  const source = value as Record<string, unknown>;
-  const normalized: Record<string, unknown> = {};
-  for (const key of Object.keys(source).sort()) {
-    if (NOISY_KEYS.has(key)) continue;
-    const item = source[key];
-    if (key === 'base64' && typeof item === 'string') {
-      normalized[key] = `[binary:${item.length}]`;
-      continue;
-    }
-    normalized[key] = normalizeForFingerprint(item, depth + 1, seen);
-  }
-  return normalized;
-}
-
 function parseArgumentsForFingerprint(raw: string): unknown {
   try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      const args = { ...(parsed as Record<string, unknown>) };
-      delete args.conversationId;
-      return args;
-    }
-    return parsed;
+    return JSON.parse(raw) as unknown;
   } catch {
     return raw;
   }
 }
 
-function fnv1a(input: string): string {
+type FingerprintOptions = {
+  ignoreTimeNoise?: boolean;
+  ignoreRootConversationId?: boolean;
+};
+
+type FingerprintFrame =
+  | { kind: 'value'; value: unknown; root?: boolean }
+  | { kind: 'array'; value: unknown[]; index: number }
+  | { kind: 'object'; value: Record<string, unknown>; keys: string[]; index: number };
+
+// Bound object traversal without truncating strings, arrays or ordinary deep results.
+// If an exceptional result exceeds this bound, only the total round budget applies:
+// an incomplete fingerprint is insufficient evidence that the tool has stalled.
+const MAX_FINGERPRINT_VALUES = 100_000;
+
+function createRoundFingerprint() {
   let hash = 0x811c9dc5;
-  for (let i = 0; i < input.length; i++) {
-    hash ^= input.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return (hash >>> 0).toString(16).padStart(8, '0');
+  let secondHash = 0x9e3779b9;
+  let remainingValues = MAX_FINGERPRINT_VALUES;
+  let complete = true;
+
+  const write = (input: string) => {
+    for (let i = 0; i < input.length; i++) {
+      const code = input.charCodeAt(i);
+      hash = Math.imul(hash ^ code, 0x01000193);
+      secondHash = Math.imul(secondHash ^ code, 0x01000193);
+    }
+  };
+  const writeString = (input: string) => {
+    write(`s${input.length}:`);
+    write(input);
+  };
+
+  const append = (value: unknown, options: FingerprintOptions = {}) => {
+    const ancestors = new WeakSet<object>();
+    const stack: FingerprintFrame[] = [{ kind: 'value', value, root: true }];
+    try {
+      while (stack.length > 0 && complete) {
+        const frame = stack[stack.length - 1];
+        if (frame.kind !== 'value') {
+          if (frame.kind === 'array') {
+            if (frame.index >= frame.value.length) {
+              write(']');
+              ancestors.delete(frame.value);
+              stack.pop();
+            } else {
+              stack.push({ kind: 'value', value: frame.value[frame.index++] });
+            }
+          } else if (frame.index >= frame.keys.length) {
+            write('}');
+            ancestors.delete(frame.value);
+            stack.pop();
+          } else {
+            const key = frame.keys[frame.index++];
+            writeString(key);
+            stack.push({ kind: 'value', value: frame.value[key] });
+          }
+          continue;
+        }
+
+        stack.pop();
+        if (remainingValues-- <= 0) {
+          complete = false;
+          break;
+        }
+        const item = frame.value;
+        if (item === null) {
+          write('null;');
+        } else if (typeof item === 'string') {
+          writeString(item);
+        } else if (typeof item !== 'object') {
+          write(`${typeof item}:${String(item)};`);
+        } else if (ancestors.has(item)) {
+          write('circular;');
+        } else {
+          ancestors.add(item);
+          if (Array.isArray(item)) {
+            write('[');
+            stack.push({ kind: 'array', value: item, index: 0 });
+          } else {
+            const keys = Object.keys(item).filter((key) =>
+              !(options.ignoreTimeNoise && NOISY_KEYS.has(key))
+              && !(frame.root && options.ignoreRootConversationId && key === 'conversationId'),
+            );
+            if (keys.length > remainingValues) {
+              complete = false;
+              break;
+            }
+            keys.sort();
+            write('{');
+            stack.push({ kind: 'object', value: item as Record<string, unknown>, keys, index: 0 });
+          }
+        }
+      }
+    } catch {
+      // A non-JSON tool payload (for example a throwing getter) must not break the run.
+      complete = false;
+    }
+  };
+
+  return {
+    append,
+    finish: () => ({
+      complete,
+      fingerprint: `${(hash >>> 0).toString(16).padStart(8, '0')}${(secondHash >>> 0).toString(16).padStart(8, '0')}`,
+    }),
+  };
 }
 
 export function createToolLoopState(): ToolLoopState {
@@ -122,17 +177,20 @@ export function recordToolRound(
   toolCalls: ToolCallLike[],
   results: LlmToolCallResult[],
 ): ToolLoopDecision {
-  const fingerprintInput = {
-    calls: toolCalls.map((toolCall) => ({
-      name: toolCall.function.name,
-      arguments: parseArgumentsForFingerprint(toolCall.function.arguments),
-    })),
-    results: results.map((result) => ({
-      name: result.name,
-      result: normalizeForFingerprint(result.result),
-    })),
-  };
-  const fingerprint = fnv1a(JSON.stringify(fingerprintInput));
+  const roundFingerprint = createRoundFingerprint();
+  roundFingerprint.append(toolCalls.length);
+  for (const toolCall of toolCalls) {
+    roundFingerprint.append(toolCall.function.name);
+    roundFingerprint.append(parseArgumentsForFingerprint(toolCall.function.arguments), {
+      ignoreRootConversationId: true,
+    });
+  }
+  roundFingerprint.append(results.length);
+  for (const result of results) {
+    roundFingerprint.append(result.name);
+    roundFingerprint.append(result.result, { ignoreTimeNoise: true });
+  }
+  const { fingerprint, complete } = roundFingerprint.finish();
 
   state.roundsCompleted += 1;
   state.totalToolCalls += toolCalls.length;
@@ -144,7 +202,11 @@ export function recordToolRound(
     state.consecutiveDomScriptRounds = 0;
     state.lastDomScriptWarningCount = 0;
   }
-  if (state.lastRoundFingerprint === fingerprint) {
+  if (!complete) {
+    state.lastRoundFingerprint = undefined;
+    state.repeatedRoundCount = 0;
+    state.warnedStallFingerprint = undefined;
+  } else if (state.lastRoundFingerprint === fingerprint) {
     state.repeatedRoundCount += 1;
   } else {
     state.lastRoundFingerprint = fingerprint;
@@ -202,7 +264,7 @@ export function finalAnswerControlInstruction(
     ? 'Repeated tool rounds stopped making observable progress.'
     : `The execution budget of ${HARD_TOOL_ROUND_LIMIT} tool rounds has been reached.`;
   return `${reasonText} The run completed ${state.roundsCompleted} tool rounds and ${state.totalToolCalls} tool calls.
-Do not call any more tools. Answer the original user request now using the evidence already collected. Clearly distinguish confirmed findings, incomplete items, and limitations. Never invent missing evidence. Even if the task is incomplete, return the most useful partial result instead of an execution error.`;
+Do not call any more tools. Answer the original user request now using the evidence already collected. Clearly distinguish confirmed findings, incomplete items, and limitations. Never invent missing evidence. Even if the task is incomplete, return the most useful partial result instead of an execution error. State the remaining work clearly and explain that the user can continue it in this conversation; do not claim that further work has been scheduled or already executed.`;
 }
 
 export function appendRuntimeControl(

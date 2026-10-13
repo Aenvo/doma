@@ -55,8 +55,10 @@ export interface LlmSendMessageOptions {
   skipAppendUserMessage?: boolean;
   onConversationStart: (conversationId: string) => void;
   onConversationDone: (conversationId: string, msgIds: string[]) => void;
-  /** 仅发布已确认不再调用工具的最终用户可见正文；工具轮次中的临时文本只保留在模型历史。 */
+  /** Final visible text; delta chunks are allowed only in explicitly tool-disabled final rounds. Tool-enabled rounds publish once after confirmation. */
   onTextMessage: (conversationId: string, msgId: string, content: string) => void;
+  /** Reconcile the complete final body after delta delivery, before reporting completion. */
+  onTextMessageComplete?: (conversationId: string, msgId: string, content: string) => void | Promise<void>;
   /** 仅当上游 API 实际返回 reasoning_content / reasoning 时触发。 */
   onReasoningMessage?: (conversationId: string, msgId: string, content: string) => void;
   onToolCallStart: (conversationId: string, msgId: string, toolCall: any) => void;

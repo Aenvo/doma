@@ -4,7 +4,8 @@ import { trimMessages, estimateMessagesTokens, prepareLlmHistory } from "./conte
 import { CONTEXT_LIMITS } from "./contextManager";
 import { fetchSSE } from "../sseFetcher";
 import { prepareUserSendText } from "../interactionBlockSendHints";
-import { applyLlmUsage } from "./contextUsage";
+import { applyLlmUsage, type LlmTokenUsage } from "./contextUsage";
+import { classifyEmptyResponse } from "./responsePolicy";
 import {
   buildAskPageToolBlockedPayload,
   getLastUserVisibleGoal,
@@ -35,8 +36,8 @@ export const EMPTY_RESPONSE_RECOVERY_PROMPT =
   "The previous attempt ended without a final answer. Respond to the original user request now with a concise final answer. Do not call another tool unless it is strictly necessary.";
 
 export class EmptyAssistantResponseError extends Error {
-  constructor() {
-    super("The model finished without returning a final answer");
+  constructor(message = "The model finished without returning a final answer") {
+    super(message);
     this.name = "EmptyAssistantResponseError";
   }
 }
@@ -45,6 +46,13 @@ export class ToolRoundLimitError extends Error {
   constructor(limit = MAX_TOOL_ROUNDS_PER_TURN) {
     super(`The task exceeded the safety limit of ${limit} tool rounds`);
     this.name = "ToolRoundLimitError";
+  }
+}
+
+export class AssistantResponseTerminationError extends Error {
+  constructor(message = 'The model response ended before a complete answer was confirmed.') {
+    super(message);
+    this.name = 'AssistantResponseTerminationError';
   }
 }
 
@@ -252,6 +260,9 @@ export class LlmService {
             let assistantText = '';
             let assistantReasoning = '';
             let finishReason = '';
+            let streamCompleted: boolean | undefined;
+            let refusalDetected = false;
+            let lastUsage: LlmTokenUsage | undefined;
             let sawToolCall = false;
             await prepareLlmHistory(history as Parameters<typeof prepareLlmHistory>[0], _conversationId);
             for await (const sseEvent of fetchSSE(
@@ -269,6 +280,7 @@ export class LlmService {
               signal,
             )) {
               if (sseEvent.type === 'usage' && sseEvent.usage) {
+                lastUsage = sseEvent.usage;
                 applyLlmUsage(_conversationId, sseEvent.usage);
                 console.log("[usage debug] onUsage", {
                   conversationId: _conversationId,
@@ -279,6 +291,9 @@ export class LlmService {
               }
               if (sseEvent.type === 'text') {
                 assistantText += sseEvent.content;
+                if (requestControl.disableTools) {
+                  options.onTextMessage(_conversationId, msgId, sseEvent.content);
+                }
               }
               if (sseEvent.type === 'reasoning') {
                 assistantReasoning += sseEvent.content;
@@ -288,10 +303,19 @@ export class LlmService {
                   sseEvent.content,
                 );
               }
-              if (sseEvent.type === 'done' && sseEvent.finishReason) {
-                finishReason = sseEvent.finishReason;
+              if (sseEvent.type === 'done') {
+                finishReason = sseEvent.finishReason || '';
+                streamCompleted = sseEvent.completed;
+                refusalDetected = sseEvent.refusalDetected === true;
               }
               if (sseEvent.type === 'tool_call') {
+                const termination = classifyEmptyResponse({
+                  finishReason: sseEvent.finishReason, streamCompleted: sseEvent.completed,
+                  refusalDetected: sseEvent.refusalDetected,
+                });
+                if (['blocked', 'incomplete', 'token-limit', 'aborted'].includes(termination.kind)) {
+                  throw new AssistantResponseTerminationError(termination.errorMessage);
+                }
                 if (requestControl.disableTools) {
                   throw new ToolRoundLimitError();
                 }
@@ -440,8 +464,18 @@ export class LlmService {
               }
             }
 
+            // Parsers can return on cancellation without throwing an AbortError.
+            if (signal.aborted) return 'aborted';
+            const emptyDecision = classifyEmptyResponse({
+              finishReason, streamCompleted, refusalDetected,
+              reasoningLength: assistantReasoning.trim().length, usage: lastUsage,
+            });
+            if (assistantText.trim() && ['incomplete', 'token-limit', 'aborted'].includes(emptyDecision.kind)) {
+              throw new AssistantResponseTerminationError(emptyDecision.errorMessage);
+            }
+
             // 纯文本回复结束，将 assistant 消息加入历史
-            if (assistantText) {
+            if (assistantText && !requestControl.disableTools) {
               history.push({
                 role: 'assistant',
                 content: assistantText,
@@ -452,17 +486,19 @@ export class LlmService {
             if (!assistantText.trim() && !sawToolCall) {
               options.onMessageDone(_conversationId, msgId);
               if (
-                emptyResponseRecoveries < MAX_EMPTY_RESPONSE_RECOVERIES &&
+                emptyDecision.retry && emptyResponseRecoveries < MAX_EMPTY_RESPONSE_RECOVERIES &&
                 !signal.aborted
               ) {
                 console.warn(`[${this.getName()}] Empty final response; retrying once`, {
                   conversationId: _conversationId,
                   finishReason,
                   reasoningLength: assistantReasoning.length,
+                  recoveryKind: emptyDecision.kind,
+                  completionTokens: lastUsage?.completionTokens,
                 });
                 const recoveryMessage: ConversationMessage = {
                   role: "user",
-                  content: EMPTY_RESPONSE_RECOVERY_PROMPT,
+                  content: emptyDecision.recoveryInstruction || EMPTY_RESPONSE_RECOVERY_PROMPT,
                 };
                 history.push(recoveryMessage);
                 try {
@@ -485,6 +521,7 @@ export class LlmService {
                   if (recoveryIndex >= 0) history.splice(recoveryIndex, 1);
                 }
               }
+              if (!emptyDecision.retry) throw new AssistantResponseTerminationError(emptyDecision.errorMessage);
               throw new EmptyAssistantResponseError();
             }
 
@@ -493,6 +530,7 @@ export class LlmService {
               assistantText.trim() &&
               !signal.aborted &&
               !requestControl.disableTools &&
+              emptyDecision.kind !== 'blocked' &&
               (await shouldForceToolRecovery({
                 conversationId: _conversationId,
                 history,
@@ -529,8 +567,17 @@ export class LlmService {
 
             // 一轮响应可能先输出进度文本，随后才发起 tool_call。只有整轮确认没有
             // 工具调用时才发布为用户可见正文，避免把临时播报持久化成聊天消息。
-            if (assistantText) {
+            if (assistantText && !requestControl.disableTools) {
               options.onTextMessage(_conversationId, msgId, assistantText);
+            }
+            if (requestControl.disableTools) {
+              await options.onTextMessageComplete?.(_conversationId, msgId, assistantText);
+              if (signal.aborted) return 'aborted';
+              history.push({
+                role: 'assistant',
+                content: assistantText,
+                ...(assistantReasoning ? { reasoning_content: assistantReasoning } : {}),
+              } as any);
             }
             options.onMessageDone(_conversationId, msgId);
             return "done";

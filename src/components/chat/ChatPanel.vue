@@ -6583,6 +6583,29 @@ function upsertAssistantMessage(
   queueMessagePersist(msgId, convId);
 }
 
+/** The service's full final body wins over chunks reloaded during a tab switch. */
+function finalizeStreamedAssistantMessage(convId: string, msgId: string, fullText: string): Promise<void> {
+  const previous = messagePersistQueues.get(msgId) ?? Promise.resolve();
+  const next = previous.catch(() => {}).then(async () => {
+    const content = sanitizeAssistantUserFacing(fullText);
+    const updated = await chatStorage.updateMessage(msgId, { content });
+    if (!updated) await chatStorage.addMessage({ id: msgId, conversationId: convId, role: 'assistant', content, toolCalls: [] });
+    // A conversation load may finish with an older snapshot while the write awaits.
+    if (convId === conversationId.value) {
+      const message = messages.value.find((item) => item.id === msgId);
+      if (message) message.content = content;
+      else messages.value.push({ id: msgId, role: 'assistant', content, toolCalls: [] });
+    }
+    messagePersistErrors.delete(msgId);
+    safariShellOnAssistantUpsert(convId, msgId, content);
+  }).catch((error) => {
+    messagePersistErrors.set(msgId, error instanceof Error ? error.message : String(error));
+    throw error;
+  });
+  messagePersistQueues.set(msgId, next);
+  return next;
+}
+
 async function copyToClipboard(text: string) {
   const t = text ?? "";
   if (!t) return;
@@ -7503,6 +7526,7 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
         }
         upsertAssistantMessage(convId, msgId, content);
       },
+      onTextMessageComplete: finalizeStreamedAssistantMessage,
       onToolCallStart: (convId, msgId, toolCall) => {
         if (activeStreamMsgId.value === msgId) {
           activeStreamMsgId.value = null;

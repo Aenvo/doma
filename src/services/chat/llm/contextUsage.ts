@@ -38,6 +38,8 @@ export type LlmTokenUsage = {
   promptImageTokens: number;
   completionTextTokens: number;
   completionImageTokens: number;
+  /** Included in completionTokens, never add it again to the total. */
+  reasoningTokens?: number;
 };
 
 /** 本轮入账用的固定分项（发请求时记下，等 usage 到齐再累加） */
@@ -350,6 +352,9 @@ export function parseLlmUsageFromSse(raw: unknown): LlmTokenUsage | null {
     completionTextTokens:
       typeof cd.text_tokens === "number" ? cd.text_tokens : completionTokens,
     completionImageTokens: typeof cd.image_tokens === "number" ? cd.image_tokens : 0,
+    ...(typeof cd.reasoning_tokens === "number" && Number.isFinite(cd.reasoning_tokens) && cd.reasoning_tokens >= 0
+      ? { reasoningTokens: cd.reasoning_tokens }
+      : {}),
   };
 }
 

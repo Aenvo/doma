@@ -14,7 +14,7 @@ import {
 
 const ANTHROPIC_VERSION = '2023-06-01';
 
-function usageFromAnthropic(raw: unknown): LlmTokenUsage | null {
+function usageFromAnthropic(raw: unknown, previousInput?: number): LlmTokenUsage | null {
   if (!raw || typeof raw !== 'object') return null;
   const u = raw as Record<string, unknown>;
   const input =
@@ -22,7 +22,7 @@ function usageFromAnthropic(raw: unknown): LlmTokenUsage | null {
       ? u.input_tokens
       : typeof (u as { prompt_tokens?: number }).prompt_tokens === 'number'
         ? (u as { prompt_tokens: number }).prompt_tokens
-        : null;
+         : previousInput ?? null;
   if (input == null) return null;
   const output =
     typeof u.output_tokens === 'number'
@@ -85,6 +85,7 @@ export async function* fetchAnthropicSSE(
   let eventName = '';
   let stopReason = '';
   let streamEnded = false;
+  let lastUsage: LlmTokenUsage | null = null;
 
   const flushTools = function* (): Generator<SseEvent> {
     if (toolCallBufferMap.size === 0) return;
@@ -139,7 +140,10 @@ export async function* fetchAnthropicSSE(
       if (type === 'message_start') {
         const msg = json.message as { usage?: unknown } | undefined;
         const usage = usageFromAnthropic(msg?.usage);
-        if (usage) yield { type: 'usage', content: '', usage, msgId };
+        if (usage) {
+          lastUsage = usage;
+          yield { type: 'usage', content: '', usage, msgId };
+        }
         continue;
       }
 
@@ -178,8 +182,11 @@ export async function* fetchAnthropicSSE(
       if (type === 'message_delta') {
         const delta = json.delta as { stop_reason?: string } | undefined;
         if (delta?.stop_reason) stopReason = delta.stop_reason;
-        const usage = usageFromAnthropic(json.usage);
-        if (usage) yield { type: 'usage', content: '', usage, msgId };
+        const usage = usageFromAnthropic(json.usage, lastUsage?.promptTokens);
+        if (usage) {
+          lastUsage = usage;
+          yield { type: 'usage', content: '', usage, msgId };
+        }
         continue;
       }
 
@@ -204,10 +211,13 @@ export async function* fetchAnthropicSSE(
 
   // tool_use 结束：产出完整 tool_calls（与 OpenAI fetchSSE 末尾 flush 一致）
   if (stopReason === 'tool_use' || toolCallBufferMap.size > 0) {
-    yield* flushTools();
+    for (const toolEvent of flushTools()) {
+      yield { ...toolEvent, completed: streamEnded || !!stopReason, ...(stopReason ? { finishReason: stopReason } : {}) };
+    }
   }
 
-  yield { type: 'done', content: '', toolCalls: [], msgId, ...(stopReason ? { finishReason: stopReason } : {}) };
+  yield { type: 'done', content: '', toolCalls: [], msgId,
+    completed: streamEnded || !!stopReason, ...(stopReason ? { finishReason: stopReason } : {}) };
 }
 
 export { ANTHROPIC_VERSION };

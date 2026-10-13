@@ -10,6 +10,7 @@ import {
 import {
   EMPTY_RESPONSE_RECOVERY_PROMPT,
   EmptyAssistantResponseError,
+  AssistantResponseTerminationError,
   type LlmCallOutcome,
   LlmService,
   MAX_EMPTY_RESPONSE_RECOVERIES,
@@ -54,6 +55,8 @@ import {
   shouldForceToolRecovery,
 } from './textOnlyToolRecovery';
 import { callBrowserToolViaRuntime } from './browserToolRuntimeClient';
+import { classifyEmptyResponse } from './responsePolicy';
+import type { LlmTokenUsage } from './contextUsage';
 
 type ClaudeBlock = Record<string, unknown>;
 
@@ -251,6 +254,9 @@ export class AnthropicClaudeService extends LlmService {
       msgIds.push(msgId);
       options.onMessageStart(_conversationId, msgId);
       let assistantText = '';
+      let finishReason = '';
+      let streamCompleted: boolean | undefined;
+      let lastUsage: LlmTokenUsage | undefined;
       // OpenAI stub 路径对 Claude block 不友好；截图过期在 processToolResults 侧处理
       try {
         await prepareLlmHistory(
@@ -278,13 +284,25 @@ export class AnthropicClaudeService extends LlmService {
         signal,
       )) {
         if (sseEvent.type === 'usage' && sseEvent.usage) {
+          lastUsage = sseEvent.usage;
           applyLlmUsage(_conversationId, sseEvent.usage);
           continue;
         }
         if (sseEvent.type === 'text') {
           assistantText += sseEvent.content;
+          if (requestControl.disableTools) {
+            options.onTextMessage(_conversationId, msgId, sseEvent.content);
+          }
+        }
+        if (sseEvent.type === 'done') {
+          finishReason = sseEvent.finishReason || '';
+          streamCompleted = sseEvent.completed;
         }
         if (sseEvent.type === 'tool_call') {
+          const termination = classifyEmptyResponse({ finishReason: sseEvent.finishReason, streamCompleted: sseEvent.completed });
+          if (['blocked', 'incomplete', 'token-limit', 'aborted'].includes(termination.kind)) {
+            throw new AssistantResponseTerminationError(termination.errorMessage);
+          }
           if (requestControl.disableTools) {
             throw new ToolRoundLimitError();
           }
@@ -446,21 +464,28 @@ export class AnthropicClaudeService extends LlmService {
         }
       }
 
-      if (assistantText) {
+      if (signal.aborted) return 'aborted';
+      const emptyDecision = classifyEmptyResponse({ finishReason, streamCompleted, usage: lastUsage });
+      if (assistantText.trim() && ['incomplete', 'token-limit', 'aborted'].includes(emptyDecision.kind)) {
+        throw new AssistantResponseTerminationError(emptyDecision.errorMessage);
+      }
+      if (assistantText && !requestControl.disableTools) {
         claudeHistory.push({ role: 'assistant', content: assistantText });
       }
       if (!assistantText.trim()) {
         options.onMessageDone(_conversationId, msgId);
         if (
-          emptyResponseRecoveries < MAX_EMPTY_RESPONSE_RECOVERIES &&
+          emptyDecision.retry && emptyResponseRecoveries < MAX_EMPTY_RESPONSE_RECOVERIES &&
           !signal.aborted
         ) {
           console.warn('[Anthropic] Empty final response; retrying once', {
             conversationId: _conversationId,
+            finishReason, recoveryKind: emptyDecision.kind,
+            completionTokens: lastUsage?.completionTokens,
           });
           const recoveryMessage: ClaudeHistoryMsg = {
             role: 'user',
-            content: EMPTY_RESPONSE_RECOVERY_PROMPT,
+            content: emptyDecision.recoveryInstruction || EMPTY_RESPONSE_RECOVERY_PROMPT,
           };
           claudeHistory.push(recoveryMessage);
           try {
@@ -483,12 +508,14 @@ export class AnthropicClaudeService extends LlmService {
             if (recoveryIndex >= 0) claudeHistory.splice(recoveryIndex, 1);
           }
         }
+        if (!emptyDecision.retry) throw new AssistantResponseTerminationError(emptyDecision.errorMessage);
         throw new EmptyAssistantResponseError();
       }
       if (
         assistantText.trim() &&
         !signal.aborted &&
         !requestControl.disableTools &&
+        emptyDecision.kind !== 'blocked' &&
         (await shouldForceToolRecovery({
           conversationId: _conversationId,
           history,
@@ -525,7 +552,12 @@ export class AnthropicClaudeService extends LlmService {
       }
 
       // Claude 也可能在 tool_use 前输出阶段性说明；仅最终无工具轮次进入聊天正文。
-      options.onTextMessage(_conversationId, msgId, assistantText);
+      if (!requestControl.disableTools) options.onTextMessage(_conversationId, msgId, assistantText);
+      else {
+        await options.onTextMessageComplete?.(_conversationId, msgId, assistantText);
+        if (signal.aborted) return 'aborted';
+        claudeHistory.push({ role: 'assistant', content: assistantText });
+      }
       options.onMessageDone(_conversationId, msgId);
       return 'done';
     } catch (e) {

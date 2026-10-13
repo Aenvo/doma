@@ -7,6 +7,9 @@ export type SseEvent = {
     msgId?: string;            // 消息ID
     usage?: LlmTokenUsage;
     finishReason?: string;
+    /** A protocol end marker or final finish reason was observed, rather than EOF alone. */
+    completed?: boolean;
+    refusalDetected?: boolean;
 };
 
 export const SSE_IDLE_TIMEOUT_MS = 90_000;
@@ -170,6 +173,7 @@ export async function* fetchSSE(
     const toolCallBufferMap = new Map<number, any>();
     let buffer = '';
     let finishReason = '';
+    let refusalDetected = false;
     let streamEnded = false;
     try {
     while (true) {
@@ -223,13 +227,11 @@ export async function* fetchSSE(
                     }
                     if (delta?.content) {
                         yield { type: 'text', content: delta.content, toolCalls: [], msgId: msgId };
-                        // 如果之前有正在进行的工具调用，说明工具调用结束了，先产出工具事件
-                        if (toolCallBufferMap.size > 0) {
-                            const allTools = Array.from(toolCallBufferMap.values());
-                            yield { type: 'tool_call', content: '', toolCalls: allTools, msgId: msgId };
-                            toolCallBufferMap.clear(); // 清空缓存
-                            
-                        }
+                        // Keep tools buffered until the stream's terminal status is known.
+                    }
+                    if (typeof delta?.refusal === 'string' && delta.refusal) {
+                        refusalDetected = true;
+                        yield { type: 'text', content: delta.refusal, toolCalls: [], msgId };
                     }
 
                     if (delta?.tool_calls && delta.tool_calls.length > 0) {
@@ -281,11 +283,15 @@ export async function* fetchSSE(
 
     if (toolCallBufferMap.size > 0) {
         const allTools = Array.from(toolCallBufferMap.values());
-        yield { type: 'tool_call', content: '', toolCalls: allTools, msgId: msgId };
+        yield { type: 'tool_call', content: '', toolCalls: allTools, msgId,
+            completed: streamEnded || !!finishReason,
+            ...(finishReason ? { finishReason } : {}), ...(refusalDetected ? { refusalDetected } : {}) };
         toolCallBufferMap.clear();
     }
 
-    yield { type: 'done', content: '', toolCalls: [], msgId: msgId, ...(finishReason ? { finishReason } : {}) };
+    yield { type: 'done', content: '', toolCalls: [], msgId,
+        completed: streamEnded || !!finishReason,
+        ...(finishReason ? { finishReason } : {}), ...(refusalDetected ? { refusalDetected } : {}) };
 }
 
 export async function* fetchJSONChunk(

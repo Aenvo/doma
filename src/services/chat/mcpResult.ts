@@ -35,7 +35,8 @@ export function assembleMcpTurnResult(messages: ResultMessage[]): McpTurnResult 
     const content = !message.isProcess && typeof message.content === "string" ? message.content.trim() : "";
     if (content) {
       parts.push(content);
-      for (const match of content.matchAll(/https?:\/\/[^\s<>\])]+/g)) {
+      // Raw backticks delimit Markdown code; encoded URL data (%60) stays intact.
+      for (const match of content.matchAll(/https?:\/\/[^\s<>\])`]+/g)) {
         const url = safeWebUrl(match[0].replace(/[.,;!?，。；！？]+$/, ""));
         if (url) sources.add(url);
       }

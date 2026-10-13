@@ -9,6 +9,7 @@ import {
   type LlmToolCallResult,
 } from './llmTypes';
 import { LlmService } from './llmService';
+import { resolveOutputTokenLimit } from './responsePolicy';
 import {
   appendRuntimeControl,
   type LlmRequestControl,
@@ -34,13 +35,6 @@ interface CompatibleMessage extends ConversationMessage {
   expiredInNextRound?: boolean;
   expireKind?: 'screenshot' | 'caption';
   fileId?: string;
-}
-
-function maxOutputTokensForModel(model: string): number {
-  const normalized = model.toLowerCase();
-  return /(deepseek|reasoner|(?:^|[-_/])r1(?:$|[-_/])|thinking|qwq|qwen3)/.test(normalized)
-    ? 8192
-    : 4096;
 }
 
 export class OpenAICompatibleService extends LlmService {
@@ -116,12 +110,14 @@ export class OpenAICompatibleService extends LlmService {
       ...history,
     ];
 
+    const tokenLimit = resolveOutputTokenLimit({ model: this.model, extraBody: this.extraBody });
+    const { max_tokens: _maxTokens, max_completion_tokens: _maxCompletionTokens, ...extraBody } = this.extraBody;
     const requestBody = {
       model: this.model,
       messages,
-      max_tokens: maxOutputTokensForModel(this.model),
       stream: true,
-      ...this.extraBody,
+      ...extraBody,
+      [tokenLimit.field]: tokenLimit.value,
       ...(requestControl.disableTools
         ? { tools: undefined, tool_choice: undefined }
         : {

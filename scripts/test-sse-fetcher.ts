@@ -212,6 +212,29 @@ try {
       console.error = originalError;
     }
   });
+  await check('Protocol completion, refusal and reasoning usage remain distinguishable', async () => {
+    globalThis.fetch = async () => streamResponse(['data: {"choices":[{"delta":{"refusal":"Cannot comply."},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"completion_tokens_details":{"reasoning_tokens":3}}}\n']).response;
+    const events = await collect(sse.fetchSSE('https://example.test', {}, 'refusal'));
+    assert.equal(events.find((event) => event.type === 'text')?.content, 'Cannot comply.');
+    assert.equal(events.at(-1)?.completed, true);
+    assert.equal(events.at(-1)?.refusalDetected, true);
+    assert.equal(events.find((event) => event.type === 'usage')?.usage?.reasoningTokens, 3);
+    globalThis.fetch = async () => streamResponse(['data: {"choices":[{"delta":{"content":"partial"}}]}\n']).response;
+    assert.equal((await collect(sse.fetchSSE('https://example.test', {}, 'unterminated'))).at(-1)?.completed, false);
+  });
+  await check('Anthropic final output usage merges with the initial input usage', async () => {
+    globalThis.fetch = async () => streamResponse([
+      'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":12,"output_tokens":0}}}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]).response;
+    const events = await collect(fetchAnthropicSSE('https://example.test', {}, 'usage'));
+    const usages = events.filter((event) => event.type === 'usage');
+    assert.equal(usages.at(-1)?.usage?.promptTokens, 12);
+    assert.equal(usages.at(-1)?.usage?.completionTokens, 7);
+    assert.equal(usages.at(-1)?.usage?.totalTokens, 19);
+    assert.equal(events.at(-1)?.completed, true);
+  });
   console.log(`SSE fetcher regression checks passed (${checks})`);
 } finally {
   globalThis.fetch = originalFetch;

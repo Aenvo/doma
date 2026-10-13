@@ -16,6 +16,30 @@ assert.deepEqual(result.artifacts, [{ type: "FILE_CARD", title: "report.pdf", ur
 assert.doesNotMatch(JSON.stringify(result), /must-not-leak/);
 assert.doesNotMatch(JSON.stringify(result), /private tool output/);
 
+// Native MCP acceptance: a Markdown closing backtick must not become URL %60.
+const xSource = "https://x.com/NiallxYoung/status/2101485716286865803";
+const inlineCodeContent = `完整 URL：\`${xSource}\``;
+const inlineCodeResult = assembleMcpTurnResult([{ role: "assistant", content: inlineCodeContent }]);
+assert.equal(inlineCodeResult.text, inlineCodeContent);
+assert.deepEqual(inlineCodeResult.sources, [xSource]);
+assert.deepEqual(assembleMcpTurnResult([
+  { role: "assistant", content: `\`\`\`${xSource}\`\`\`` },
+]).sources, [xSource]);
+
+const encodedSource = "https://example.com/a%60b?value=%60&quote=%22x%22#part%60";
+assert.deepEqual(assembleMcpTurnResult([
+  { role: "assistant", content: `\`${encodedSource}\`。` },
+]).sources, [encodedSource]);
+const querySource = "https://example.com/a'b?first=one&second=two#details";
+assert.deepEqual(assembleMcpTurnResult([
+  { role: "assistant", content: `[原文](${querySource})，另见 \`${querySource}\`。` },
+]).sources, [querySource]);
+assert.deepEqual(assembleMcpTurnResult([
+  { role: "user", content: "https://private.example/user" },
+  { role: "assistant", isProcess: true, content: "`https://private.example/tool`" },
+  { role: "assistant", content: "正文只含 `file:///private/path` 和 `javascript:alert(1)`。" },
+]).sources, []);
+
 assert.equal(assembleMcpTurnResult([
   { role: "assistant", content: "请选择 A 还是 B？" },
 ]).status, "needs_user_input");
