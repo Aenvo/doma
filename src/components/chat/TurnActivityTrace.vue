@@ -9,7 +9,7 @@
     >
       <span
         class="activity-trace__status-dot"
-        :class="`activity-trace__status-dot--${trace.status}`"
+        :class="executionUnverified ? '' : `activity-trace__status-dot--${trace.status}`"
         aria-hidden="true"
       ></span>
       <span class="activity-trace__title" aria-live="polite">{{ title }}</span>
@@ -23,8 +23,8 @@
     <Transition name="activity-trace-body">
       <div v-if="trace.expanded" :id="bodyId" class="activity-trace__body">
         <div v-if="trace.items.length === 0" class="activity-trace__empty">
-          <span class="activity-trace__marker activity-trace__marker--running" aria-hidden="true"></span>
-          <span>{{ t('chat.activity.waiting') }}</span>
+          <span class="activity-trace__marker" :class="{ 'activity-trace__marker--running': !executionUnverified }" aria-hidden="true"></span>
+          <span>{{ t(executionUnverified ? 'chat.activity.unverified' : 'chat.activity.waiting') }}</span>
         </div>
         <ol v-else class="activity-trace__list">
           <li v-if="trace.omittedCount" class="activity-trace__omitted">
@@ -38,10 +38,11 @@
           >
             <span
               class="activity-trace__marker"
-              :class="`activity-trace__marker--${item.status}`"
+              :class="executionUnverified && item.status === 'running' ? '' : `activity-trace__marker--${item.status}`"
               aria-hidden="true"
             ></span>
             <div class="activity-trace__item-content">
+              <span v-if="executionUnverified && item.status === 'running'">{{ t('chat.activity.unverified') }} · </span>
               <span>{{ item.kind === 'reasoning' ? t('chat.activity.reasoning') : item.text }}</span>
               <span v-if="(item.count ?? 1) > 1" class="activity-trace__count"> × {{ item.count }}</span>
               <a
@@ -67,6 +68,7 @@ import ChatChevronForwardSvg from "@/assets/images/chat-chevron-forward.svg";
 
 const props = defineProps<{
   trace: TurnActivityTrace;
+  executionUnverified?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -78,6 +80,7 @@ const { t } = useI18n();
 const bodyId = computed(() => `activity-trace-${props.trace.id.replace(/[^a-zA-Z0-9_-]/g, "-")}`);
 
 const title = computed(() => {
+  if (props.executionUnverified && props.trace.status === "running") return t("chat.activity.unverified");
   if (props.trace.status === "running") {
     return t(`chat.activity.${props.trace.phase}`);
   }

@@ -107,6 +107,7 @@ export default {
       },
       activity: {
         thinking: "Thinking…",
+        unverified: "Execution status unverified",
         searching: "Searching…",
         browsing: "Browsing…",
         working: "Working…",
@@ -660,6 +661,7 @@ export default {
       },
       activity: {
         thinking: "正在思考",
+        unverified: "执行状态待核实",
         searching: "正在搜索",
         browsing: "正在浏览",
         working: "正在执行",

@@ -63,6 +63,11 @@ try {
   await tick();
   const first = bridge.sendMcpBridgeResult({ conversationId: "conv", requestId: "turn-1", ok: true, text: "完成", status: "done" });
   await tick();
+  assert.equal(bridge.hasPendingMcpTerminalResult("turn-1", "conv"), true);
+  assert.equal(bridge.hasPendingMcpTerminalResult("turn-1", "other-conv"), false);
+  assert.equal(bridge.hasPendingMcpTerminalResult("other-turn", "conv"), false);
+  assert.equal(bridge.hasPendingMcpTerminalResult("", "conv"), false);
+  assert.equal(bridge.hasPendingMcpTerminalResult("turn-1", "   "), false);
   const firstSocket = FakeWebSocket.sockets.at(-1)!;
   assert.equal(firstSocket.sent.filter((message) => message.type === "result").length, 1);
   let acknowledged = false;
@@ -77,6 +82,7 @@ try {
   secondSocket.receive({ type: "result_ack", resultId: "turn-1" });
   assert.equal(await first, true);
   assert.deepEqual(outboxIds(), []);
+  assert.equal(bridge.hasPendingMcpTerminalResult("turn-1", "conv"), false);
 
   bridge.startMcpBridgeClient(() => {}, [bridge.DOMA_MCP_BRIDGE_PORT, bridge.DOMA_CLI_BRIDGE_PORT]);
   await tick();
@@ -88,8 +94,10 @@ try {
   assert.equal(cliSocket.sent.filter((message) => message.type === "result").length, 1);
   const pending = bridge.sendMcpBridgeResult({ conversationId: "conv", requestId: "turn-2", ok: false, text: "失败", status: "error" });
   await tick();
+  assert.equal(bridge.hasPendingMcpTerminalResult("turn-2", "conv"), true);
   bridge.stopMcpBridgeClient();
   assert.equal(await pending, false);
+  assert.equal(bridge.hasPendingMcpTerminalResult("turn-2", "conv"), true);
   bridge.startMcpBridgeClient(() => {}, [bridge.DOMA_MCP_BRIDGE_PORT, bridge.DOMA_CLI_BRIDGE_PORT]);
   await tick();
   const restoredSocket = FakeWebSocket.sockets.filter((socket) => socket.url.endsWith(":3847")).at(-1)!;
@@ -292,7 +300,67 @@ try {
   unrelated.setMcpBridgePanelContext({});
   unrelated.setMcpBridgeActiveConversation("legacy", { conversationId: "legacy", mode: "single", tabId: 73 });
   assert.equal(FakeWebSocket.sockets.at(-1)!.sent.filter((message) => message.type === "hello").at(-1)!.activeConversationId, undefined);
-  console.log("MCP result ACK, reconnect, multi-panel persistence, migration, TTL and conversation ownership passed");
+
+  // A fresh renderer can probe durable terminal records without restoring or sending.
+  const probe = await loadPanel();
+  const probeCreatedAt = Date.now();
+  const probeRecord = (requestId: string | undefined, conversationId: string, resultId: string, status = "done") => ({
+    message: { type: "result", requestId, conversationId, resultId, status, ok: status === "done", text: "terminal" },
+    createdAt: probeCreatedAt, port: 3847,
+  });
+  saved.set(outboxKey("independent-result-id"), JSON.stringify(probeRecord("probe-request", "probe-conv", "independent-result-id", "needs_user_input")));
+  const beforeProbe = [...saved.entries()];
+  const socketsBeforeProbe = FakeWebSocket.sockets.length;
+  const sentBeforeProbe = FakeWebSocket.sockets.reduce((total, socket) => total + socket.sent.length, 0);
+  assert.equal(probe.hasPendingMcpTerminalResult("probe-request", "probe-conv"), true);
+  assert.equal(probe.hasPendingMcpTerminalResult("probe-request", "other-conv"), false);
+  assert.equal(probe.hasPendingMcpTerminalResult("other-request", "probe-conv"), false);
+  assert.deepEqual([...saved.entries()], beforeProbe);
+  assert.equal(FakeWebSocket.sockets.length, socketsBeforeProbe);
+  assert.equal(FakeWebSocket.sockets.reduce((total, socket) => total + socket.sent.length, 0), sentBeforeProbe);
+  saved.delete(outboxKey("independent-result-id"));
+
+  // Legacy data is inspected in place. A missing request ID cannot match by result ID.
+  const legacyProbe = JSON.stringify([
+    probeRecord(undefined, "probe-conv", "probe-request"),
+    probeRecord("legacy-probe-request", "legacy-probe-conv", "legacy-probe-result", "error"),
+  ]);
+  saved.set("doma:mcp:result-outbox:v1", legacyProbe);
+  assert.equal(probe.hasPendingMcpTerminalResult("probe-request", "probe-conv"), false);
+  assert.equal(probe.hasPendingMcpTerminalResult("legacy-probe-request", "legacy-probe-conv"), true);
+  assert.equal(probe.hasPendingMcpTerminalResult("legacy-probe-request", "probe-conv"), false);
+  assert.equal(saved.get("doma:mcp:result-outbox:v1"), legacyProbe);
+  assert.deepEqual(outboxIds(), []);
+  saved.delete("doma:mcp:result-outbox:v1");
+
+  // Invalid or expired readable records never prove an exact pending terminal.
+  const wrongKeyRecord = JSON.stringify(probeRecord("probe-request", "probe-conv", "different-id"));
+  saved.set(outboxKey("wrong-key"), wrongKeyRecord);
+  assert.equal(probe.hasPendingMcpTerminalResult("probe-request", "probe-conv"), false);
+  saved.delete(outboxKey("wrong-key"));
+  saved.set(outboxKey("running-result"), JSON.stringify(probeRecord("probe-request", "probe-conv", "running-result", "running")));
+  assert.equal(probe.hasPendingMcpTerminalResult("probe-request", "probe-conv"), false);
+  saved.delete(outboxKey("running-result"));
+  const expiredProbe = JSON.stringify({ ...probeRecord("probe-request", "probe-conv", "expired-probe"), createdAt: probeCreatedAt - 31 * 60 * 1000 });
+  saved.set(outboxKey("expired-probe"), expiredProbe);
+  assert.equal(probe.hasPendingMcpTerminalResult("probe-request", "probe-conv"), false);
+  assert.equal(saved.get(outboxKey("expired-probe")), expiredProbe);
+  saved.delete(outboxKey("expired-probe"));
+
+  // Unreadable storage blocks recovery conservatively, without deleting evidence.
+  saved.set(outboxKey("unreadable"), "broken JSON");
+  assert.equal(probe.hasPendingMcpTerminalResult("probe-request", "probe-conv"), true);
+  assert.equal(saved.get(outboxKey("unreadable")), "broken JSON");
+  saved.delete(outboxKey("unreadable"));
+  const originalGetItem = localStorage.getItem;
+  try {
+    localStorage.getItem = () => { throw new Error("storage unavailable"); };
+    assert.equal(probe.hasPendingMcpTerminalResult("probe-request", "probe-conv"), true);
+  } finally {
+    localStorage.getItem = originalGetItem;
+  }
+  assert.equal(probe.hasPendingMcpTerminalResult("probe-request", "probe-conv"), false);
+  console.log("MCP result ACK, reconnect, multi-panel persistence, migration, TTL, ownership and read-only terminal recovery probe passed");
 } finally {
   Date.now = originalNow;
   for (const client of clients) client.stopMcpBridgeClient();

@@ -409,6 +409,7 @@ class ChatStorageService {
         | 'toolInput'
         | 'toolBarItems'
         | 'toolCalls'
+        | 'activityTrace'
       >
     >,
   ): Promise<boolean> {
@@ -438,6 +439,54 @@ class ChatStorageService {
       request.onerror = () => reject(request.error);
     });
     return true;
+  }
+
+  /** Atomically preserve terminal turns and reject stale request/context identities. */
+  async markMcpTurnInterrupted(id: string, requestId: string, executionContextId: string, summary: string): Promise<boolean> {
+    if (!requestId || !executionContextId) return false;
+    const db = await this.ensureDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_MESSAGES, 'readwrite');
+      const store = tx.objectStore(STORE_MESSAGES);
+      let changed = false;
+      const request = store.get(id);
+      request.onsuccess = () => {
+        const row = request.result as StoredMessage | undefined;
+        const raw = row?.toolInput?.mcpTurn;
+        if (!row || row.role !== 'user' || !raw || typeof raw !== 'object') return;
+        const turn = raw as Record<string, unknown>;
+        if (turn.status !== 'running' || turn.requestId !== requestId || turn.executionContextId !== executionContextId
+            || turn.requestConversationId !== row.conversationId) return;
+        store.put({ ...row, toolInput: { ...row.toolInput, mcpTurn: { ...turn, status: 'error', summary, interruptionResultPending: true } } });
+        changed = true;
+      };
+      tx.oncomplete = () => resolve(changed);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  }
+
+  /** Clear only the precise interruption receipt that the bridge acknowledged. */
+  async clearMcpTurnInterruptionResult(id: string, requestId: string, conversationId: string): Promise<void> {
+    if (!id || !requestId || !conversationId) return;
+    const db = await this.ensureDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_MESSAGES, 'readwrite');
+      const store = tx.objectStore(STORE_MESSAGES);
+      const request = store.get(id);
+      request.onsuccess = () => {
+        const row = request.result as StoredMessage | undefined;
+        const raw = row?.toolInput?.mcpTurn;
+        if (!row || row.role !== 'user' || row.conversationId !== conversationId || !raw || typeof raw !== 'object') return;
+        const turn = raw as Record<string, unknown>;
+        if (turn.status !== 'error' || turn.requestId !== requestId || turn.requestConversationId !== conversationId
+            || turn.interruptionResultPending !== true) return;
+        store.put({ ...row, toolInput: { ...row.toolInput, mcpTurn: { ...turn, interruptionResultPending: false } } });
+      };
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
   }
 
   async deleteMessage(id: string): Promise<boolean> {

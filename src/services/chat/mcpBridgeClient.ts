@@ -110,6 +110,56 @@ function resultOutboxKey(resultId: string): string {
   return `${RESULT_OUTBOX_PREFIX}${resultId}`;
 }
 
+function readResultOutboxRecord(raw: string, key?: string): {
+  message: Extract<McpBridgeOutboundMessage, { type: "result" }>;
+  createdAt: number;
+  port?: number;
+} | null {
+  const record = JSON.parse(raw);
+  const message = record?.message;
+  const createdAt = Number(record?.createdAt);
+  if (message?.type !== "result" || typeof message.resultId !== "string" || !message.resultId ||
+      (key !== undefined && key !== resultOutboxKey(message.resultId)) || !Number.isFinite(createdAt)) return null;
+  return { message, createdAt, port: record?.port };
+}
+
+/**
+ * Read-only recovery guard: true means an exact terminal result is still pending,
+ * or the outbox cannot be read reliably. Never replay, migrate, expire or ACK here.
+ */
+export function hasPendingMcpTerminalResult(requestId: string, conversationId: string): boolean {
+  if (!requestId.trim() || !conversationId.trim()) return false;
+  const matches = (message: Extract<McpBridgeOutboundMessage, { type: "result" }>) =>
+    message.requestId === requestId && message.conversationId === conversationId &&
+    (message.status === "done" || message.status === "error" || message.status === "needs_user_input");
+  for (const entry of pendingResults.values()) {
+    if (matches(entry.message)) return true;
+  }
+  try {
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (!key?.startsWith(RESULT_OUTBOX_PREFIX)) continue;
+      const raw = localStorage.getItem(key);
+      if (!raw) continue;
+      const record = readResultOutboxRecord(raw, key);
+      if (record && Date.now() - record.createdAt <= RESULT_OUTBOX_TTL_MS && matches(record.message)) return true;
+    }
+    const legacy = localStorage.getItem(LEGACY_RESULT_OUTBOX_KEY);
+    if (legacy) {
+      const records = JSON.parse(legacy);
+      if (!Array.isArray(records)) return true;
+      for (const value of records) {
+        const record = readResultOutboxRecord(JSON.stringify(value));
+        if (record && Date.now() - record.createdAt <= RESULT_OUTBOX_TTL_MS && matches(record.message)) return true;
+      }
+    }
+    return false;
+  } catch {
+    // An unreadable outbox is not evidence that its terminal result is absent.
+    return true;
+  }
+}
+
 function saveResultOutbox(resultId: string): void {
   const entry = pendingResults.get(resultId);
   if (!entry) return;
@@ -164,14 +214,12 @@ function loadResultOutbox(): void {
       if (!raw) continue;
       let record;
       try {
-        record = JSON.parse(raw);
+        record = readResultOutboxRecord(raw, key);
       } catch {
         continue;
       }
-      const message = record?.message;
-      const createdAt = Number(record?.createdAt);
-      if (message?.type !== "result" || typeof message.resultId !== "string" || !message.resultId ||
-          key !== resultOutboxKey(message.resultId) || !Number.isFinite(createdAt)) continue;
+      if (!record) continue;
+      const { message, createdAt } = record;
       if (Date.now() - createdAt > RESULT_OUTBOX_TTL_MS) {
         removeResultOutbox(message.resultId);
         continue;

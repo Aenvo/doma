@@ -462,7 +462,8 @@
           >DomA</span>
           <TurnActivityTraceView
             v-if="item.msg.role === 'assistant' && item.msg.activityTrace"
-            :trace="item.msg.activityTrace"
+            :trace="mcpItemActivityTrace(item.id, item.msg.activityTrace)"
+            :execution-unverified="isMcpItemExecutionUnverified(item.id)"
             @toggle="onActivityTraceToggle(item.msg)"
           />
           <!-- user: 纯文本渲染；assistant: Markdown 渲染（已做 XSS 清洗） -->
@@ -946,10 +947,12 @@ import { buildZipBlob, triggerBlobDownload } from "@/services/chat/extensionZip"
 import { normalizeMcpExternalSendText } from "@/services/chat/mcpExternalSend";
 import { notePanelActivity, pingServiceWorker, logIdleDiag } from "@/services/chat/swIdleDiag";
 import { assembleMcpTurnResult, type McpTurnResult } from "@/services/chat/mcpResult";
+import { decideMcpExecutionRecovery, getMcpExecutionContextId, getMcpExecutionContextState } from "@/services/chat/mcpExecutionIdentity";
 import {
   DOMA_CLI_BRIDGE_PORT,
   DOMA_MCP_BRIDGE_PORT,
   isMcpBridgeConnected,
+  hasPendingMcpTerminalResult,
   sendMcpBridgeAccepted,
   sendMcpBridgeResult,
   sendMcpBridgeRunning,
@@ -1616,8 +1619,9 @@ async function processMcpExternalTask(payload: {
       return;
     }
     const targetTab = await getContext().browser.tabs.get(payload.targetTabId ?? panelHostTabId! ).catch(() => null);
+    const executionContextId = await getMcpExecutionContextId(getContext().browser.runtime, window.location.href);
     const mcpUserMessageId = await addMessage(cid, "user", sendText, undefined, {
-      mcpTurn: { callerAgent, targetTitle: targetTab?.title || "", targetUrl: payload.targetUrl || targetTab?.url || "", status: "running" },
+      mcpTurn: { callerAgent, requestId, requestConversationId: cid, executionContextId, targetTitle: targetTab?.title || "", targetUrl: payload.targetUrl || targetTab?.url || "", status: "running" },
     });
     await send2(sendText, {
       conversationId: cid,
@@ -1720,8 +1724,9 @@ async function processMcpExternalMessage(payload: {
       return;
     }
     const targetUrl = await resolveCurrentConversationUrl().catch(() => "");
+    const executionContextId = await getMcpExecutionContextId(getContext().browser.runtime, window.location.href);
     const mcpUserMessageId = await addMessage(targetConversationId, "user", sendText, undefined, {
-      mcpTurn: { callerAgent, targetUrl, status: "running" },
+      mcpTurn: { callerAgent, requestId, requestConversationId: targetConversationId, executionContextId, targetUrl, status: "running" },
     });
     await send2(sendText, {
       conversationId: targetConversationId,
@@ -4799,8 +4804,30 @@ function isMcpDisplayItemVisible(item: DisplayItem): boolean {
   const owner = mcpDisplayTurns.value.owners.get(item.id);
   return !owner || isMcpTurnExpanded(owner);
 }
+function isMcpTurnExecutionUnverified(message: ChatMessage | undefined): boolean {
+  const meta = message?.toolInput?.mcpTurn;
+  const latestUser = messages.value.findLast((row) => row.role === "user");
+  return !!meta && typeof meta === "object" && (meta as Record<string, unknown>).status === "running"
+    && (message?.id !== latestUser?.id || (!isConversationLoading(conversationId.value)
+      && !abortControllersByConversation.has(conversationId.value || "")));
+}
+function isMcpItemExecutionUnverified(itemId: string): boolean {
+  const owner = mcpDisplayTurns.value.owners.get(itemId);
+  return !!owner && isMcpTurnExecutionUnverified(messages.value.find((message) => message.id === owner));
+}
+/** A saved terminal state wins even when cosmetic trace persistence failed. */
+function mcpItemActivityTrace(itemId: string, trace: TurnActivityTrace): TurnActivityTrace {
+  const owner = mcpDisplayTurns.value.owners.get(itemId);
+  const turn = messages.value.find((message) => message.id === owner)?.toolInput?.mcpTurn;
+  if (trace.status !== "running" || !turn || typeof turn !== "object"
+      || (turn as Record<string, unknown>).status !== "error") return trace;
+  const interrupted = cloneTurnActivityTrace(trace);
+  finishTurnActivityTrace(interrupted, "error");
+  return interrupted;
+}
 function mcpTurnSummary(id: string): string {
   const msg = messages.value.find((entry) => entry.id === id);
+  if (isMcpTurnExecutionUnverified(msg)) return "执行状态待核实 · 当前侧栏未恢复执行器";
   const meta = msg?.toolInput?.mcpTurn;
   if (meta && typeof meta === "object") {
     const turn = meta as Record<string, unknown>;
@@ -4830,6 +4857,83 @@ async function persistMcpTurnStatus(messageId: string, status: string, text: str
   await chatStorage.updateMessage(messageId, { toolInput });
   const panel = getMessageById(messageId);
   if (panel) panel.toolInput = toolInput;
+}
+
+const recoveringMcpConversations = new Set<string>();
+const MCP_INTERRUPTED_NOTICE = "侧栏已重建，上一轮执行中断；已保存内容仍保留。请明确重试。";
+/** The durable pending flag closes the gap between marking an interruption and queueing its result. */
+function queueInterruptedMcpTurnResult(user: StoredMessage, savedOutput: StoredMessage[]): void {
+  const turn = user.toolInput?.mcpTurn as Record<string, unknown>;
+  const requestId = turn.requestId as string;
+  const convId = user.conversationId;
+  let partial: McpTurnResult | undefined;
+  try { partial = assembleMcpTurnResult(savedOutput); } catch { /* No visible output was saved. */ }
+  // Startup must not wait for a bridge that is initialized only after loadConversation.
+  void reportMcpExternalResult({
+    conversationId: convId, requestId, ok: false, status: "error",
+    text: MCP_INTERRUPTED_NOTICE + (partial ? `\n\n未完成的已保存结果：\n${partial.text}` : ""),
+    ...(partial ? { sources: partial.sources, artifacts: partial.artifacts } : {}),
+  }).then((acknowledged) => {
+    if (acknowledged) return chatStorage.clearMcpTurnInterruptionResult(user.id, requestId, convId);
+  }).catch((error) => console.warn("[ChatPanel] interrupted result remains pending", error));
+}
+/** A disconnected socket is insufficient: only browser-proven owner loss ends a precise request. */
+async function recoverInterruptedMcpTurn(convId: string): Promise<void> {
+  const context = getConversationContext(convId);
+  const ownsPanelTab = panelHostTabId != null && context && (
+    context.mode === "single" ? context.tabId === panelHostTabId :
+      context.mode === "group" && context.groupId != null && Number.isInteger(context.groupId) && context.groupId >= 0
+        && Array.isArray(context.groupTabs) && context.groupTabs.includes(panelHostTabId)
+  );
+  if (!ownsPanelTab) return;
+  if (recoveringMcpConversations.has(convId) || isConversationLoading(convId) || abortControllersByConversation.has(convId)) return;
+  recoveringMcpConversations.add(convId);
+  try {
+    const rows = await chatStorage.getMessagesByConversation(convId);
+    const userIndex = rows.findLastIndex((row) => row.role === "user");
+    const user = rows[userIndex];
+    const raw = user?.toolInput?.mcpTurn;
+    if (!raw || typeof raw !== "object") return;
+    const turn = raw as Record<string, unknown>;
+    if (turn.requestConversationId !== convId || typeof turn.requestId !== "string" || !turn.requestId
+        || typeof turn.executionContextId !== "string" || !turn.executionContextId) return;
+    const requestId = turn.requestId;
+    const executionContextId = turn.executionContextId;
+    if (hasPendingMcpTerminalResult(requestId, convId)) return;
+    if (turn.status === "error" && turn.interruptionResultPending === true) {
+      queueInterruptedMcpTurnResult(user, rows.slice(userIndex + 1));
+      return;
+    }
+    if (turn.status !== "running") return;
+    const ownerContextState = await getMcpExecutionContextState(getContext().browser.runtime, executionContextId);
+    const decision = decideMcpExecutionRecovery({
+      status: turn.status, requestId, ownerContextId: executionContextId, ownerContextState,
+      hasController: isConversationLoading(convId) || abortControllersByConversation.has(convId),
+      hasPendingTerminalResult: hasPendingMcpTerminalResult(requestId, convId),
+    });
+    if (decision !== "interrupted") return;
+    // Recheck after the browser query; a terminal result or a newer user turn wins.
+    const latestRows = await chatStorage.getMessagesByConversation(convId);
+    const latestUser = latestRows.findLast((row) => row.role === "user");
+    if (latestUser?.id !== user.id || isConversationLoading(convId) || abortControllersByConversation.has(convId)
+        || hasPendingMcpTerminalResult(requestId, convId)) return;
+    const marked = await chatStorage.markMcpTurnInterrupted(user.id, requestId, executionContextId, MCP_INTERRUPTED_NOTICE);
+    if (!marked) return;
+    const savedOutput = latestRows.slice(latestRows.indexOf(latestUser) + 1);
+    // Queue the terminal result before cosmetic cleanup; never wait for startup's bridge ACK here.
+    queueInterruptedMcpTurnResult(user, savedOutput);
+    for (const row of savedOutput) {
+      if (row.activityTrace?.status !== "running") continue;
+      const trace = cloneTurnActivityTrace(row.activityTrace);
+      finishTurnActivityTrace(trace, "error");
+      await chatStorage.updateMessage(row.id, { activityTrace: trace });
+    }
+    await clearDoingToolCallsInIdb(savedOutput.map((row) => row.id));
+  } catch (error) {
+    console.warn("[ChatPanel] MCP interrupted-turn recovery could not verify state", error);
+  } finally {
+    recoveringMcpConversations.delete(convId);
+  }
 }
 
 /**
@@ -6114,6 +6218,8 @@ async function loadConversation(convId: string | undefined, reason = "unknown") 
       return;
     }
 
+    // An accepted new request owns its send path; never recover the preceding turn into it.
+    if (reason !== "mcp.externalTask") await recoverInterruptedMcpTurn(convId);
     const storedMessages = await chatStorage.getMessagesByConversation(convId);
     messages.value = storedMessages.map((m) => ({
       id: m.id,
