@@ -14,7 +14,7 @@ import {
 
 const ANTHROPIC_VERSION = '2023-06-01';
 
-function usageFromAnthropic(raw: unknown, previousInput?: number): LlmTokenUsage | null {
+function usageFromAnthropic(raw: unknown, previous?: LlmTokenUsage | null): LlmTokenUsage | null {
   if (!raw || typeof raw !== 'object') return null;
   const u = raw as Record<string, unknown>;
   const input =
@@ -22,14 +22,14 @@ function usageFromAnthropic(raw: unknown, previousInput?: number): LlmTokenUsage
       ? u.input_tokens
       : typeof (u as { prompt_tokens?: number }).prompt_tokens === 'number'
         ? (u as { prompt_tokens: number }).prompt_tokens
-         : previousInput ?? null;
+        : previous?.promptTokens ?? null;
   if (input == null) return null;
   const output =
     typeof u.output_tokens === 'number'
       ? u.output_tokens
       : typeof (u as { completion_tokens?: number }).completion_tokens === 'number'
         ? (u as { completion_tokens: number }).completion_tokens
-        : 0;
+        : previous?.completionTokens ?? 0;
   return {
     promptTokens: input,
     completionTokens: output,
@@ -142,7 +142,6 @@ export async function* fetchAnthropicSSE(
         const usage = usageFromAnthropic(msg?.usage);
         if (usage) {
           lastUsage = usage;
-          yield { type: 'usage', content: '', usage, msgId };
         }
         continue;
       }
@@ -182,10 +181,9 @@ export async function* fetchAnthropicSSE(
       if (type === 'message_delta') {
         const delta = json.delta as { stop_reason?: string } | undefined;
         if (delta?.stop_reason) stopReason = delta.stop_reason;
-        const usage = usageFromAnthropic(json.usage, lastUsage?.promptTokens);
+        const usage = usageFromAnthropic(json.usage, lastUsage);
         if (usage) {
           lastUsage = usage;
-          yield { type: 'usage', content: '', usage, msgId };
         }
         continue;
       }
@@ -207,6 +205,10 @@ export async function* fetchAnthropicSSE(
   } finally {
     void reader.cancel().catch(() => {});
     reader.releaseLock();
+
+    // Start/delta usage is cumulative. Settle known usage once even if the
+    // stream fails; yielding here preserves the error for the next iteration.
+    if (lastUsage) yield { type: 'usage', content: '', usage: lastUsage, msgId };
   }
 
   // tool_use 结束：产出完整 tool_calls（与 OpenAI fetchSSE 末尾 flush 一致）
