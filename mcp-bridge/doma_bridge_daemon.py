@@ -33,7 +33,7 @@ from xml.sax.saxutils import escape as xml_escape
 
 from bridge_auth import load_or_create_token
 
-SERVER_VERSION = "0.7.8"
+SERVER_VERSION = "0.7.9"
 BRIDGE_PROTOCOL_VERSION = 1
 CONTROL_PORT = int(os.environ.get("DOMA_CONTROL_PORT", "3846"))
 BRIDGE_PORT = int(os.environ.get("DOMA_BRIDGE_PORT", "3847"))
@@ -45,6 +45,7 @@ _TASKS: dict[str, dict[str, Any]] = {}
 _REQUESTS: dict[str, dict[str, Any]] = {}
 _REQUEST_TO_CONVERSATION: dict[str, str] = {}
 _TASKS_LOCK = threading.Lock()
+_UNSET_REQUEST_ID = object()
 _STOP_REQUESTED = threading.Event()
 
 _CLIENTS: list[Any] = []
@@ -171,10 +172,14 @@ def _normalize_caller_agent(value: Any) -> str:
     return "MCP"
 
 
-def _update_task(conversation_id: str, **fields: Any) -> bool:
+def _update_task(conversation_id: str, *, expected_request_id: Any = _UNSET_REQUEST_ID, **fields: Any) -> bool:
     with _TASKS_LOCK:
         rec = _TASKS.get(conversation_id)
         if not rec:
+            return False
+        # A result can be delayed after its first identity check while another
+        # turn starts. Check again in the same lock as both record updates.
+        if expected_request_id is not _UNSET_REQUEST_ID and rec.get("requestId") != expected_request_id:
             return False
         if rec.get("status") in ("done", "error", "needs_user_input"):
             return False
@@ -191,6 +196,10 @@ def _update_task(conversation_id: str, **fields: Any) -> bool:
                     text=rec.get("text") or "",
                     updatedAt=now,
                 )
+                if req.get("operation") == "close":
+                    event = req.get("event")
+                    if isinstance(event, threading.Event):
+                        event.set()
         return True
 
 
@@ -391,7 +400,7 @@ def _bind_conversation(request_id: str, conversation_id: str) -> None:
             return
         now = time.time()
         req["conversationId"] = cid
-        if req.get("status") == "error":
+        if req.get("status") in ("done", "error", "needs_user_input"):
             return
         req["status"] = "running"
         req["text"] = "DomA 已创建会话并开始执行"
@@ -410,19 +419,21 @@ def _bind_conversation(request_id: str, conversation_id: str) -> None:
             "targetTitle": req.get("targetTitle"),
             "targetUrl": req.get("targetUrl"),
         }
-        event = req.get("event")
+        # For close, accepted confirms routing only. Its waiter requires the
+        # terminal result produced after the extension's actual close attempt.
+        event = None if req.get("operation") == "close" else req.get("event")
     if isinstance(event, threading.Event):
         event.set()
 
 
-def _fail_request(request_id: str, text: str) -> None:
+def _fail_request(request_id: str, text: str) -> bool:
     rid = request_id.strip()
     if not rid:
-        return
+        return False
     with _TASKS_LOCK:
         req = _REQUESTS.get(rid)
-        if not req:
-            return
+        if not req or req.get("status") in ("done", "error", "needs_user_input"):
+            return False
         req["status"] = "error"
         req["ok"] = False
         req["error"] = text
@@ -432,10 +443,11 @@ def _fail_request(request_id: str, text: str) -> None:
         cid = req.get("conversationId")
         if isinstance(cid, str) and cid.strip():
             rec = _TASKS.get(cid.strip())
-            if rec:
+            if rec and rec.get("requestId") == rid:
                 rec.update(status="error", ok=False, text=text, updatedAt=time.time())
     if isinstance(event, threading.Event):
         event.set()
+    return True
 
 
 def _resolve_conversation_id(msg: dict[str, Any]) -> Optional[str]:
@@ -851,6 +863,7 @@ def close_conversation(
         _REQUESTS[request_id] = {
             "requestId": request_id,
             "conversationId": cid,
+            "operation": "close",
             "status": "pending",
             "ok": False,
             "text": "",
@@ -880,8 +893,9 @@ def close_conversation(
                 }},
             )
 
-        if not event.wait(BIND_TIMEOUT_SEC):
-            _fail_request(request_id, "等待 DomA 关闭会话超时")
+        # A completion may commit after wait() decides False. The locked
+        # failure update preserves that terminal result and lets us return it.
+        if not event.wait(BIND_TIMEOUT_SEC) and _fail_request(request_id, "等待 DomA 关闭会话超时"):
             return _payload(
                 False,
                 "等待 DomA 关闭会话超时（侧栏未打开或会话不存在）",
@@ -893,7 +907,7 @@ def close_conversation(
             )
 
         with _TASKS_LOCK:
-            req = _REQUESTS.get(request_id) or {}
+            req = dict(_REQUESTS.get(request_id) or {})
             err = req.get("error")
             status = str(req.get("status") or "pending")
 
@@ -908,18 +922,12 @@ def close_conversation(
                 **_conversation_connection_state(cid),
             )
 
-        _update_task(
-            cid,
-            status="done",
-            ok=True,
-            text=f"会话已关闭（conversationId={cid}）",
-        )
         return _payload(
-            True,
-            f"会话已关闭（conversationId={cid}）",
+            status == "done" and req.get("ok") is True,
+            str(req.get("text") or "DomA 未确认会话已关闭"),
             conversationId=cid,
             requestId=request_id,
-            status="done",
+            status=status,
             callerAgent=caller,
             **_conversation_connection_state(cid),
         )
@@ -981,18 +989,21 @@ def _apply_extension_result(msg: dict[str, Any]) -> bool:
 
     cid = _resolve_conversation_id(msg)
     if cid:
-        rid = msg.get("requestId")
+        rid = msg.get("requestId") if isinstance(msg.get("requestId"), str) else None
         with _TASKS_LOCK:
             current = _TASKS.get(cid)
             if not current or (isinstance(rid, str) and current.get("requestId") != rid):
                 return bool(current and isinstance(rid, str))
+            # Older extensions can omit requestId. Their result still belongs
+            # to the task observed here, including a recovered task with no ID.
+            expected_request_id = current.get("requestId")
         if status == "running":
-            _update_task(cid, status="running", text=text or "DomA 执行中…")
+            _update_task(cid, expected_request_id=expected_request_id, status="running", text=text or "DomA 执行中…")
             return True
         if status == "pending":
-            _update_task(cid, status="pending", text=text)
+            _update_task(cid, expected_request_id=expected_request_id, status="pending", text=text)
             return True
-        _update_task(cid, status=status, ok=ok, text=text,
+        _update_task(cid, expected_request_id=expected_request_id, status=status, ok=ok, text=text,
                      sources=msg.get("sources") if isinstance(msg.get("sources"), list) else [],
                      artifacts=msg.get("artifacts") if isinstance(msg.get("artifacts"), list) else [])
         return True

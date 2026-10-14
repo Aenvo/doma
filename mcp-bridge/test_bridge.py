@@ -329,6 +329,262 @@ class BridgeConversationRecoveryTests(unittest.TestCase):
         self.assertEqual(result["connectedTabIds"], [])
 
 
+class BridgeTurnIdentityTests(unittest.TestCase):
+    """Inject turn hand-offs using real handlers and isolated in-memory state."""
+
+    def setUp(self) -> None:
+        for name, value in (
+            ("_CLIENTS", []), ("_CLIENT_META", {}), ("_REQUEST_CLIENTS", {}),
+            ("_CONVERSATION_CLIENTS", {}), ("_CONVERSATION_TAB_IDS", {}),
+            ("_TASKS", {}), ("_REQUESTS", {}), ("_REQUEST_TO_CONVERSATION", {}),
+        ):
+            patcher = mock.patch.object(daemon, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def seed_running(self, cid: str, rid: str | None) -> None:
+        now = time.time()
+        if rid is not None:
+            daemon._REQUESTS[rid] = {"requestId": rid, "conversationId": cid,
+                                     "status": "running", "createdAt": now,
+                                     "event": threading.Event()}
+            daemon._REQUEST_TO_CONVERSATION[rid] = cid
+        daemon._TASKS[cid] = {"conversationId": cid, "requestId": rid,
+                             "status": "running", "createdAt": now, "text": "current"}
+
+    def accept_message(self, request_id, _send_text, _attachments, _caller, **kwargs):
+        daemon._bind_conversation(request_id, kwargs["conversation_id"])
+        return {"ok": True}
+
+    def test_result_identity_is_checked_when_update_commits(self) -> None:
+        cases = [(status, identity) for status in ("done", "error", "needs_user_input", "running", "pending")
+                 for identity in ("explicit", "legacy", "unbound")]
+        for status, identity in cases:
+            with self.subTest(status=status, identity=identity):
+                cid = f"race-{status}-{identity}"
+                old_rid = None if identity == "unbound" else f"old-{status}-{identity}"
+                self.seed_running(cid, old_rid)
+                update_reached, resume_update = threading.Event(), threading.Event()
+                original_update = daemon._update_task
+                accepted, failures = [], []
+
+                def delayed_update(*args, **kwargs):
+                    update_reached.set()
+                    if not resume_update.wait(2):
+                        raise AssertionError("fixture did not resume the old result")
+                    return original_update(*args, **kwargs)
+
+                def old_result():
+                    try:
+                        accepted.append(daemon._apply_extension_result({
+                            "conversationId": cid,
+                            **({"requestId": old_rid} if identity == "explicit" else {}),
+                            "status": status, "ok": True, "text": "OLD TURN OUTPUT",
+                            "sources": ["https://old.test/"],
+                        }))
+                    except Exception as error:
+                        failures.append(error)
+
+                with mock.patch.object(daemon, "_update_task", side_effect=delayed_update), \
+                     mock.patch.object(daemon, "dispatch_to_doma", side_effect=self.accept_message):
+                    thread = threading.Thread(target=old_result, daemon=True)
+                    thread.start()
+                    try:
+                        self.assertTrue(update_reached.wait(2))
+                        with daemon._TASKS_LOCK:
+                            daemon._TASKS[cid]["createdAt"] = 1
+                            if old_rid is not None:
+                                daemon._REQUESTS[old_rid]["createdAt"] = 1
+                            daemon._expire_tasks_locked(time.time())
+                        followup = daemon.send_conversation_message(cid, "NEW TURN")
+                        self.assertEqual(followup["status"], "running")
+                        new_rid = followup["requestId"]
+                    finally:
+                        resume_update.set()
+                        thread.join(timeout=2)
+                    self.assertFalse(thread.is_alive())
+                    self.assertEqual(failures, [])
+                    self.assertEqual(accepted, [True], "stale deliveries still need an ACK")
+                    result = daemon.get_conversation_result(cid)
+                    self.assertEqual(result["requestId"], new_rid)
+                    self.assertEqual(result["status"], "running")
+                    self.assertNotEqual(result["text"], "OLD TURN OUTPUT")
+                    self.assertEqual(result["sources"], [])
+                    self.assertEqual(daemon._REQUESTS[new_rid]["status"], "running")
+                    if old_rid is not None:
+                        self.assertEqual(daemon._REQUESTS[old_rid]["status"], "error")
+
+    def test_legacy_results_keep_working_for_the_same_task_identity(self) -> None:
+        for rid in ("legacy-current", None):
+            for status in ("done", "error", "needs_user_input", "running", "pending"):
+                with self.subTest(request_id=rid, status=status):
+                    cid = "legacy-same-identity"
+                    self.seed_running(cid, rid)
+                    self.assertTrue(daemon._apply_extension_result({
+                        "conversationId": cid, "status": status,
+                        "ok": True, "text": "same task output",
+                    }))
+                    result = daemon.get_conversation_result(cid)
+                    self.assertEqual(result["requestId"], rid)
+                    self.assertEqual(result["status"], status)
+                    self.assertEqual(result["text"], "same task output")
+                    if rid is not None and status in ("done", "error", "needs_user_input"):
+                        self.assertEqual(daemon._REQUESTS[rid]["status"], status)
+
+    def test_close_accepted_without_terminal_result_times_out(self) -> None:
+        cid = "accepted-only"
+
+        def accepted_only(request_id, conversation_id, _caller):
+            daemon._bind_conversation(request_id, conversation_id)
+            return {"ok": True}
+
+        with mock.patch.object(daemon, "dispatch_close_to_doma", side_effect=accepted_only), \
+             mock.patch.object(daemon, "BIND_TIMEOUT_SEC", 0.01):
+            result = daemon.close_conversation(cid)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "error")
+        self.assertIn("超时", result["text"])
+        self.assertEqual(daemon._REQUESTS[result["requestId"]]["status"], "error")
+        self.assertEqual(daemon._TASKS[cid]["status"], "error")
+
+    def test_close_returns_the_actual_terminal_success_or_failure(self) -> None:
+        for status, ok, text in (("done", True, "fixture really closed"),
+                                 ("error", False, "fixture close failed")):
+            with self.subTest(status=status):
+                cid = "close-terminal-" + status
+
+                def finished(request_id, conversation_id, _caller):
+                    daemon._bind_conversation(request_id, conversation_id)
+                    daemon._apply_extension_result({
+                        "conversationId": conversation_id, "requestId": request_id,
+                        "status": status, "ok": ok, "text": text,
+                    })
+                    return {"ok": True}
+
+                with mock.patch.object(daemon, "dispatch_close_to_doma", side_effect=finished), \
+                     mock.patch.object(daemon, "BIND_TIMEOUT_SEC", 0.01):
+                    result = daemon.close_conversation(cid)
+                self.assertEqual(result["status"], status)
+                self.assertEqual(result["ok"], ok)
+                self.assertEqual(result["text"], text)
+                request = daemon._REQUESTS[result["requestId"]]
+                self.assertTrue(request["event"].is_set())
+                self.assertEqual(request["status"], status)
+
+    def test_close_terminal_result_wins_if_it_commits_after_wait_times_out(self) -> None:
+        for status, ok, text in (("done", True, "close completed at deadline"),
+                                 ("error", False, "close failed at deadline"),
+                                 ("needs_user_input", True, "close requires confirmation")):
+            with self.subTest(status=status):
+                cid = "close-deadline-" + status
+
+                class DeadlineEvent(threading.Event):
+                    def wait(self, timeout=None):
+                        # Event.wait has decided to time out, but the result
+                        # commits before the caller processes its False return.
+                        request_id = daemon._TASKS[cid]["requestId"]
+                        daemon._apply_extension_result({
+                            "conversationId": cid, "requestId": request_id,
+                            "status": status, "ok": ok, "text": text,
+                        })
+                        return False
+
+                def accepted_only(request_id, conversation_id, _caller):
+                    daemon._bind_conversation(request_id, conversation_id)
+                    return {"ok": True}
+
+                with mock.patch.object(daemon.threading, "Event", DeadlineEvent), \
+                     mock.patch.object(daemon, "dispatch_close_to_doma", side_effect=accepted_only):
+                    result = daemon.close_conversation(cid)
+                self.assertEqual(result["status"], status)
+                self.assertEqual(result["ok"], status == "done" and ok)
+                self.assertEqual(result["text"], text)
+                self.assertEqual(daemon._REQUESTS[result["requestId"]]["status"], status)
+                self.assertEqual(daemon._TASKS[cid]["status"], status)
+
+    def test_close_waits_after_accepted_until_the_terminal_result(self) -> None:
+        cid = "close-delayed"
+        accepted, completed = threading.Event(), threading.Event()
+        returned, request_ids = [], []
+
+        def pending_close(request_id, conversation_id, _caller):
+            request_ids.append(request_id)
+            daemon._bind_conversation(request_id, conversation_id)
+            accepted.set()
+            return {"ok": True}
+
+        def close():
+            returned.append(daemon.close_conversation(cid))
+            completed.set()
+
+        with mock.patch.object(daemon, "dispatch_close_to_doma", side_effect=pending_close), \
+             mock.patch.object(daemon, "BIND_TIMEOUT_SEC", 1):
+            thread = threading.Thread(target=close, daemon=True)
+            thread.start()
+            try:
+                self.assertTrue(accepted.wait(1))
+                self.assertFalse(completed.wait(0.02), "accepted is not proof of closure")
+            finally:
+                if request_ids:
+                    daemon._apply_extension_result({
+                        "conversationId": cid, "requestId": request_ids[0],
+                        "status": "done", "ok": True, "text": "closed after tab removal",
+                    })
+                thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(returned[0]["text"], "closed after tab removal")
+        self.assertTrue(returned[0]["ok"])
+
+    def test_close_timeout_and_stale_result_preserve_a_new_request(self) -> None:
+        cid = "close-replaced"
+        close_ids = []
+
+        def replaced_close(request_id, conversation_id, _caller):
+            close_ids.append(request_id)
+            daemon._bind_conversation(request_id, conversation_id)
+            # An old close cannot later mutate a task now owned by another request.
+            self.seed_running(cid, "new-turn")
+            return {"ok": True}
+
+        with mock.patch.object(daemon, "dispatch_close_to_doma", side_effect=replaced_close), \
+             mock.patch.object(daemon, "BIND_TIMEOUT_SEC", 0.01):
+            result = daemon.close_conversation(cid)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["requestId"], close_ids[0])
+        self.assertTrue(daemon._apply_extension_result({
+            "conversationId": cid, "requestId": close_ids[0],
+            "status": "done", "ok": True, "text": "stale close success",
+        }))
+        current = daemon.get_conversation_result(cid)
+        self.assertEqual(current["requestId"], "new-turn")
+        self.assertEqual(current["status"], "running")
+        self.assertEqual(current["text"], "current")
+        self.assertEqual(daemon._REQUESTS["new-turn"]["status"], "running")
+
+    def test_late_close_accepted_cannot_reopen_a_completed_request(self) -> None:
+        cid = "close-late-accepted"
+
+        def finished(request_id, conversation_id, _caller):
+            daemon._bind_conversation(request_id, conversation_id)
+            daemon._apply_extension_result({
+                "conversationId": conversation_id, "requestId": request_id,
+                "status": "done", "ok": True, "text": "closed",
+            })
+            return {"ok": True}
+
+        with mock.patch.object(daemon, "dispatch_close_to_doma", side_effect=finished), \
+             mock.patch.object(daemon, "BIND_TIMEOUT_SEC", 0.01), \
+             mock.patch.object(daemon, "dispatch_to_doma", side_effect=self.accept_message):
+            closed = daemon.close_conversation(cid)
+            followup = daemon.send_conversation_message(cid, "NEW TURN")
+            daemon._bind_conversation(closed["requestId"], cid)
+        self.assertTrue(closed["ok"])
+        self.assertEqual(daemon._REQUESTS[closed["requestId"]]["status"], "done")
+        self.assertEqual(daemon._TASKS[cid]["requestId"], followup["requestId"])
+        self.assertEqual(daemon._TASKS[cid]["status"], "running")
+
+
 class BridgeProtocolTests(unittest.TestCase):
     def test_websocket_terminal_result_is_acknowledged_and_idempotent(self) -> None:
         server = daemon.ThreadingHTTPServer(("127.0.0.1", 0), daemon.BridgeWSHandler)
