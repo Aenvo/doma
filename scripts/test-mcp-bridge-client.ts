@@ -88,6 +88,14 @@ try {
   assert.equal(bridge.hasPendingMcpTerminalResult("turn-1", "conv"), false);
   assert.equal(bridge.getPendingMcpTerminalResultAck("turn-1", "conv"), undefined);
 
+  let closeInbound: any;
+  bridge.startMcpBridgeClient((message) => { closeInbound = message; }, [bridge.DOMA_MCP_BRIDGE_PORT]);
+  secondSocket.receive({ type: "close", requestId: "fixture-close", conversationId: "fixture-close-conv",
+    completionToken: "a".repeat(32), bridgePort: bridge.DOMA_CLI_BRIDGE_PORT });
+  await tick();
+  assert.equal(closeInbound.completionToken, "a".repeat(32));
+  assert.equal(closeInbound.bridgePort, bridge.DOMA_MCP_BRIDGE_PORT);
+
   bridge.startMcpBridgeClient(() => {}, [bridge.DOMA_MCP_BRIDGE_PORT, bridge.DOMA_CLI_BRIDGE_PORT]);
   await tick();
   secondSocket.receive({ type: "task", requestId: "turn-2", sendText: "test" });

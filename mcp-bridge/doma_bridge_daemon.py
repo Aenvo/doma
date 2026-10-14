@@ -33,7 +33,7 @@ from xml.sax.saxutils import escape as xml_escape
 
 from bridge_auth import load_or_create_token
 
-SERVER_VERSION = "0.7.9"
+SERVER_VERSION = "0.7.10"
 BRIDGE_PROTOCOL_VERSION = 1
 CONTROL_PORT = int(os.environ.get("DOMA_CONTROL_PORT", "3846"))
 BRIDGE_PORT = int(os.environ.get("DOMA_BRIDGE_PORT", "3847"))
@@ -402,6 +402,14 @@ def _bind_conversation(request_id: str, conversation_id: str) -> None:
         req["conversationId"] = cid
         if req.get("status") in ("done", "error", "needs_user_input"):
             return
+        if req.get("operation") == "close":
+            current = _TASKS.get(cid)
+            if current and current.get("requestId") not in (rid, req.get("previousRequestId")):
+                req.update(status="error", ok=False, text="关闭请求已被新回合替代", updatedAt=now)
+                event = req.get("event")
+                if isinstance(event, threading.Event):
+                    event.set()
+                return
         req["status"] = "running"
         req["text"] = "DomA 已创建会话并开始执行"
         req["updatedAt"] = now
@@ -577,6 +585,8 @@ def dispatch_close_to_doma(
         "conversationId": conversation_id,
         "callerAgent": caller_agent,
     }
+    with _TASKS_LOCK:
+        payload["completionToken"] = (_REQUESTS.get(request_id) or {}).get("completionToken")
     client = _conversation_client(conversation_id)
     if client is None:
         return _payload(False, "原会话的 DomA 侧栏已断开，请重新打开该网页的侧栏",
@@ -864,6 +874,8 @@ def close_conversation(
             "requestId": request_id,
             "conversationId": cid,
             "operation": "close",
+            "completionToken": uuid.uuid4().hex,
+            "previousRequestId": (_TASKS.get(cid) or {}).get("requestId"),
             "status": "pending",
             "ok": False,
             "text": "",
@@ -1017,6 +1029,28 @@ def _apply_extension_result(msg: dict[str, Any]) -> bool:
 
 # ---------- WebSocket ----------
 
+def _claim_close_completion(data: dict[str, Any]) -> dict[str, Any] | None:
+    """A short-lived worker connection can own only the close capability it received."""
+    rid, cid, token = data.get("requestId"), data.get("conversationId"), data.get("completionToken")
+    if not all(isinstance(value, str) and value for value in (rid, cid, token)):
+        return None
+    if len(token) != 32 or any(char not in "0123456789abcdef" for char in token):
+        return None
+    with _TASKS_LOCK:
+        req = _REQUESTS.get(rid)
+        if not req or req.get("operation") != "close" or req.get("conversationId") != cid:
+            return None
+        expected = req.get("completionToken")
+        if not isinstance(expected, str) or not hmac.compare_digest(expected, token):
+            return None
+    # The two sockets may arrive out of order. Bind here as well as on accepted.
+    _bind_conversation(rid, cid)
+    with _TASKS_LOCK:
+        req = _REQUESTS.get(rid) or {}
+        return {"type": "close_ready", "requestId": rid, "conversationId": cid,
+                "status": req.get("status"), "ok": req.get("ok") is True,
+                "text": req.get("text") or ""}
+
 def _ws_accept_key(sec_key: str) -> str:
     guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
     digest = hashlib.sha1((sec_key + guid).encode("utf-8")).digest()
@@ -1108,6 +1142,9 @@ class BridgeWSHandler(BaseHTTPRequestHandler):
         self.send_header("Sec-WebSocket-Accept", accept)
         self.end_headers()
 
+        if urlsplit(self.path).path == "/close-result":
+            self._receive_close_completion()
+            return
         with _CLIENTS_LOCK:
             _CLIENTS.append(self)
         print(f"[daemon] extension connected ({len(_CLIENTS)} clients)", file=sys.stderr)
@@ -1190,6 +1227,35 @@ class BridgeWSHandler(BaseHTTPRequestHandler):
                     if client is self:
                         _REQUEST_CLIENTS.pop(rid, None)
             print("[daemon] extension disconnected", file=sys.stderr)
+
+    def _receive_close_completion(self) -> None:
+        # Never add this socket to panel candidates or conversation routing.
+        self.connection.settimeout(30)
+        identity: tuple[str, str] | None = None
+        while True:
+            try:
+                raw = _ws_recv_text(self.rfile)
+                if raw is None:
+                    return
+                if not raw:
+                    continue
+                data = json.loads(raw)
+                if not isinstance(data, dict):
+                    continue
+                if identity is None:
+                    ready = _claim_close_completion(data) if data.get("type") == "close_claim" else None
+                    if ready is None:
+                        self.send_text(json.dumps({"type": "close_rejected"}))
+                        return
+                    identity = (ready["requestId"], ready["conversationId"])
+                    self.send_text(json.dumps(ready, ensure_ascii=False))
+                elif (data.get("type") == "result" and data.get("status") in ("done", "error")
+                      and (data.get("requestId"), data.get("conversationId")) == identity
+                      and data.get("resultId") == identity[0]):
+                    if _apply_extension_result(data):
+                        self.send_text(json.dumps({"type": "result_ack", "resultId": identity[0]}))
+            except (OSError, ValueError):
+                return
 
 
 class ControlHTTPHandler(BaseHTTPRequestHandler):

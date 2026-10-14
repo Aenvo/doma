@@ -55,6 +55,8 @@ export type McpBridgeCloseMessage = {
   requestId: string;
   conversationId: string;
   callerAgent?: string;
+  completionToken?: string;
+  bridgePort?: number;
 };
 
 export type McpBridgeInboundMessage =
@@ -646,7 +648,7 @@ function attachLiveHandlers(slot: BridgeSlot, ws: WebSocket) {
           const closeMsg = msg as unknown as McpBridgeCloseMessage;
           if (!closeMsg.requestId || !closeMsg.conversationId) return;
           rememberRoute(port, closeMsg.requestId, closeMsg.conversationId);
-          await taskHandler?.(closeMsg);
+          await taskHandler?.({ ...closeMsg, bridgePort: port });
         }
       } catch (e) {
         console.warn("[bridge] bad message", port, e);

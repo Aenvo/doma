@@ -1754,12 +1754,14 @@ function handleMcpExternalMessageMessage(message: {
 
 /**
  * MCP `browser_close_conversation` → ChatPanel 入口。
- * 实际关闭会话逻辑请在 processMcpExternalClose 中实现。
+ * SW owns closing and its receipt because the originating panel may be destroyed.
  */
 async function processMcpExternalClose(payload: {
   requestId: string;
   targetConversationId: string;
   callerAgent: string;
+  completionToken?: string;
+  bridgePort?: number;
 }): Promise<void> {
   const { requestId, targetConversationId, callerAgent } = payload;
   console.log("[ChatPanel] processMcpExternalClose", {
@@ -1768,53 +1770,22 @@ async function processMcpExternalClose(payload: {
     callerAgent,
   });
 
-  // 先 ack，避免 daemon 等待超时
+  // 先确认路由，实际关闭与终态回执由 SW 完成。
   reportMcpExternalAccepted({ requestId, conversationId: targetConversationId });
 
   try {
-    // TODO: 在此实现关闭对话（UI / 会话状态 / 标签组等）
-    const conversation = getConversationContext(targetConversationId);
-    
     if (isConversationLoading(targetConversationId)) {
-    try {
-      abortControllersByConversation.get(targetConversationId)?.abort();
-    } catch {
-      // ignore
+      try { abortControllersByConversation.get(targetConversationId)?.abort(); } catch { /* ignore */ }
+      abortControllersByConversation.delete(targetConversationId);
     }
-    abortControllersByConversation.delete(targetConversationId);
-
-  }
-
-    if (conversation) {
-      if (conversation.mode === "group") {
-        const groupId = conversation.groupId;
-        if (typeof groupId === "number" && groupId >= 0) {
-          const browser = getContext().browser;
-          const tabs = await browser.tabs.query({ groupId });
-          const tabIds = tabs
-            .map((t: { id?: number }) => t.id)
-            .filter((id: number | undefined): id is number => typeof id === "number" && id >= 0);
-          if (tabIds.length) {
-            await browser.tabs.remove(tabIds);
-          }
-        }
-      }
-      else if (conversation.mode === "single") {
-        const tabId = conversation.tabId;
-        if (typeof tabId === "number" && tabId >= 0) {
-          const browser = getContext().browser;
-          await browser.tabs.remove(tabId);
-        }
-      }
-    }
-
-    reportMcpExternalResult({
-      requestId,
-      conversationId: targetConversationId,
-      ok: true,
-      text: `会话关闭请求已接收（conversationId=${targetConversationId}）`,
-      status: "done",
+    await awaitConversationContextPersist(targetConversationId);
+    const response = await getContext().browser.runtime.sendMessage({
+      origin: "sidepanel", operate: "chat/closeMcpConversation",
+      payload: { requestId, conversationId: targetConversationId,
+        completionToken: payload.completionToken, bridgePort: payload.bridgePort },
     });
+    if (!response?.success) throw new Error(response?.error || "关闭请求未交给后台执行");
+    // The worker has delivered its own terminal result; no panel-owned success receipt.
   } catch (e) {
     reportMcpExternalResult({
       requestId,
@@ -1830,6 +1801,8 @@ function handleMcpExternalCloseMessage(message: {
   requestId?: unknown;
   conversationId?: unknown;
   callerAgent?: unknown;
+  completionToken?: unknown;
+  bridgePort?: unknown;
 }): { ok: boolean; error?: string } {
   const requestId = typeof message.requestId === "string" ? message.requestId.trim() : "";
   const targetConversationId =
@@ -1841,7 +1814,9 @@ function handleMcpExternalCloseMessage(message: {
   if (!requestId) return { ok: false, error: "requestId required" };
   if (!targetConversationId) return { ok: false, error: "conversationId required" };
 
-  void processMcpExternalClose({ requestId, targetConversationId, callerAgent });
+  void processMcpExternalClose({ requestId, targetConversationId, callerAgent,
+    completionToken: typeof message.completionToken === "string" ? message.completionToken : undefined,
+    bridgePort: typeof message.bridgePort === "number" ? message.bridgePort : undefined });
   return { ok: true };
 }
 
@@ -2630,6 +2605,8 @@ function onMcpBridgeInbound(msg: McpBridgeInboundMessage) {
       requestId: msg.requestId,
       conversationId: msg.conversationId,
       callerAgent: msg.callerAgent,
+      completionToken: msg.completionToken,
+      bridgePort: msg.bridgePort,
     });
     return;
   }

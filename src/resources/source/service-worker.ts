@@ -36,6 +36,7 @@ import {
 import { sendToSidePanel } from "@/edition/sendToSidePanel";
 import { isSafariBuild } from "@/utils/safariBuild";
 import { installSwNativeLogBridge } from "@/services/chat/swLogBridge";
+import { closeMcpConversationInWorker } from "@/services/chat/mcpConversationClose";
 
 if (isSafariBuild()) {
   installSwNativeLogBridge();
@@ -353,6 +354,16 @@ class Background{
           const res = await this.fileLoaderHandler.getUrlData({ url: downloadUrl, responseType: 'data-url', mimeType: ""});
           sendResponse({success: res});
         })();
+      }
+      else if (operate === "chat/closeMcpConversation") {
+        // The worker owns both tab removal and receipt delivery after the side panel disappears.
+        void closeMcpConversationInWorker(getContext().browser, request.payload, sender)
+          .then((result) => {
+            try { sendResponse({ success: true, result }); } catch { /* The originating panel may already be gone. */ }
+          })
+          .catch((error) => {
+            try { sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) }); } catch { /* Same lifecycle boundary. */ }
+          });
       }
       else if (operate === "chat/abortTools") {
         const cid = String(request.conversationId ?? "").trim();
