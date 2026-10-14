@@ -74,7 +74,7 @@ export function classifyEmptyResponse(input: EmptyResponseInput): EmptyResponseD
   if (['abort', 'aborted', 'cancelled', 'canceled'].includes(finishReason)) {
     return { kind: 'aborted', retry: false };
   }
-  if (finishReason === 'length' || finishReason === 'max_tokens') {
+  if (finishReason === 'length' || finishReason === 'max_tokens' || finishReason === 'model_context_window_exceeded') {
     return {
       kind: 'token-limit',
       retry: false,

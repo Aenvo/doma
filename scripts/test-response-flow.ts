@@ -151,7 +151,7 @@ try {
         assert.equal(requests(), 1);
       });
     }
-    for (const reason of [kind === 'openai' ? 'content_filter' : 'refusal', kind === 'openai' ? 'length' : 'max_tokens']) {
+    for (const reason of [kind === 'openai' ? 'content_filter' : 'refusal', kind === 'openai' ? 'length' : 'max_tokens', 'model_context_window_exceeded']) {
       await check(`${kind}: ${reason} avoids a second billed request`, async () => {
         const fixture = make(kind), requests = queue(response(frames(kind, '', reason)));
         assert.equal(await fixture.run(), 'error'); assert.equal(requests(), 1); assert.equal(fixture.errors.length, 1);
@@ -169,8 +169,16 @@ try {
       const fixture = make(kind), requests = queue(response(''));
       assert.equal(await fixture.run(), 'error'); assert.equal(requests(), 1);
     });
+    await check(`${kind}: context-window truncation preserves streamed partial text as incomplete`, async () => {
+      const fixture = make(kind), requests = queue(response(frames(kind, 'partial answer', 'model_context_window_exceeded')));
+      assert.equal(await fixture.run(true), 'error'); assert.equal(requests(), 1);
+      assert.deepEqual(fixture.text, ['partial answer']); assert.deepEqual(fixture.fullBodies, []);
+      assert.equal(fixture.history.length, 0); assert.equal(fixture.messageDone, 0);
+      assert.equal(fixture.errors.length, 1); assert.equal(fixture.errors[0].name, 'AssistantResponseTerminationError');
+    });
     await check(`${kind}: nonempty truncation and bare EOF are errors, not successful conversations`, async () => {
       for (const body of [frames(kind, 'partial', kind === 'openai' ? 'length' : 'max_tokens'),
+        frames(kind, 'partial', 'model_context_window_exceeded'),
         kind === 'openai' ? 'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
           : 'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"partial"}}\n\n']) {
         const fixture = make(kind), requests = queue(response(body));
@@ -189,7 +197,7 @@ try {
       const toolBody = kind === 'openai'
         ? 'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"browser_get_current_tab","arguments":"{}"}}]}}]}\n\n'
         : 'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call-1","name":"browser_get_current_tab"}}\n\nevent: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}\n\n';
-      for (const reason of [undefined, kind === 'openai' ? 'content_filter' : 'refusal', kind === 'openai' ? 'length' : 'max_tokens']) {
+      for (const reason of [undefined, kind === 'openai' ? 'content_filter' : 'refusal', kind === 'openai' ? 'length' : 'max_tokens', 'model_context_window_exceeded']) {
         const fixture = make(kind); const requests = queue(response(toolBody + (reason ? frames(kind, '', reason) : '')));
         assert.equal(await fixture.run(), 'error'); assert.equal(requests(), 1);
         assert.equal((globalThis as any).__toolCalls, 0); assert.deepEqual(fixture.text, []);

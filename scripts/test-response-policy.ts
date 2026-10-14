@@ -46,7 +46,7 @@ check('aborted and unfinished streams are not empty-response retry candidates', 
 });
 
 check('length stops do not repeat the same paid request or assume which limit was hit', () => {
-  for (const finishReason of ['length', 'max_tokens']) {
+  for (const finishReason of ['length', 'max_tokens', 'model_context_window_exceeded']) {
     const result = classifyEmptyResponse({ finishReason, reasoning: 'internal thought' });
     assert.equal(result.kind, 'token-limit');
     assert.equal(result.retry, false);
