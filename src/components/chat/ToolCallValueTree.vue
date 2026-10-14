@@ -31,7 +31,7 @@ const summary = computed(() => {
       <ToolCallCopyButton :value="value" :truncated="truncated" :label="t('chat.toolCall.copyPart', { name: label })" />
     </summary>
     <div v-if="isObject" class="tree-children">
-      <ToolCallValueTree v-for="[key, child] in entries" :key="key" :label="key" :value="child" />
+      <ToolCallValueTree v-for="[key, child] in entries" :key="key" :label="key" :value="child" :truncated="truncated" />
     </div>
     <pre v-else>{{ scalar }}</pre>
   </details>

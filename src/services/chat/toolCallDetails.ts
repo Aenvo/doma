@@ -52,7 +52,7 @@ export function previewToolCallValue(input: unknown, maxChars = 12_000): ToolCal
         if (remaining <= 0 || nodes <= 0) { truncated = true; break; }
         if (key.length > 120) truncated = true;
         const label = text(key.slice(0, 120));
-        if (/^(?:api[-_]?key|.*token|authorization|cookies?|password|.*secret|credentials?)$/i.test(key)) {
+        if (/^(?:api[-_]?key|x[-_]?api[-_]?key|.*token|authorization|(?:set[-_]?)?cookies?|password|.*secret|credentials?)$/i.test(key)) {
           result[label] = '[redacted]';
         } else if (/^(?:base64|dataBase64|data_base64|imageData|bytes|binary)$/i.test(key)) {
           result[label] = '[binary omitted]';

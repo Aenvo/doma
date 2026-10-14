@@ -125,6 +125,15 @@ await check('binary payloads and credential fields are omitted, cycles remain se
   assert.ok(!encoded.includes('secret') && !encoded.includes('AAA'));
   assert.ok(encoded.includes('[circular]') && encoded.includes('[binary omitted]'));
 });
+await check('common credential headers are redacted before persistence or copy', () => {
+  const preview = previewToolCallValue({ headers: { 'Set-Cookie': 'fixture-session-secret', 'X-API-Key': 'fixture-api-secret', Accept: 'application/json' } });
+  const headers = (preview.value as any).headers;
+  assert.equal(headers['Set-Cookie'], '[redacted]');
+  assert.equal(headers['X-API-Key'], '[redacted]');
+  assert.equal(headers.Accept, 'application/json');
+  assert.ok(!JSON.stringify(preview).includes('fixture-session-secret'));
+  assert.ok(!JSON.stringify(preview).includes('fixture-api-secret'));
+});
 await check('malformed arguments are preserved as a diagnostic string', () => {
   assert.equal(startToolCallRecord({ id: 'bad', function: { name: 'tool', arguments: '{invalid' } }).details?.input?.value, '{invalid');
 });

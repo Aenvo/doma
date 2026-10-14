@@ -8013,8 +8013,12 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
         }
         setConversationThinking(errorConversationId, false);
         finishActivityTrace(errorConversationId, "error");
-        const stopErroredConversation = async (message: string) => {
+        const stopErroredConversation = async (
+          message?: string,
+          options?: { skipAssistantMessage?: boolean },
+        ) => {
           const terminalMessageId = await stopTask(message, {
+            ...options,
             conversationId: errorConversationId,
             status: "error",
           });

@@ -139,6 +139,23 @@ await check('actual copy action includes failed and interrupted evidence after J
   assert.equal(rows.get('old').toolCalls.length, 1);
   assert.equal(rows.get('old').toolCalls[0].id, 'old-tool');
 });
+await check('edition soft errors preserve history without adding a suppressed assistant notice', async () => {
+  fixture();
+  const handle = sandbox.sendEdition.handleHttpError;
+  const before = terminalIndex;
+  sandbox.sendEdition.handleHttpError = async (_error: unknown, handlers: any) => {
+    await handlers.stopTask(undefined, { skipAssistantMessage: true });
+  };
+  try {
+    const error = Object.assign(new Error('Soft failure'), { name: 'HttpError', status: 429 });
+    await sandbox.api.onMessageError('conv', 'failed-request', error);
+    assert.equal(terminalIndex, before, 'suppressed notice must not create an assistant bubble');
+    assert.equal(rows.get('third').toolCalls.length, 5);
+    assert.equal(rows.get('third').toolCalls[4].details.status, 'stopped');
+    assert.equal(sandbox.api.shouldShowToolCallHistory(sandbox.messages.value.at(-1)), true);
+    assert.equal(sandbox.cancelledConversationIds.has('conv'), false);
+  } finally { sandbox.sendEdition.handleHttpError = handle; }
+});
 await check('error history also works without the optional activity-trace feature', async () => {
   fixture();
   delete rows.get('root').activityTrace;
