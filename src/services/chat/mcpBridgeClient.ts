@@ -241,6 +241,19 @@ function loadResultOutbox(): void {
   }
 }
 
+/** Subscribe to an exact existing terminal delivery without queueing or replacing its payload. */
+export function getPendingMcpTerminalResultAck(requestId: string, conversationId: string): Promise<boolean> | undefined {
+  if (!requestId.trim() || !conversationId.trim()) return;
+  // Recovery may run before socket startup has restored the durable outbox.
+  loadResultOutbox();
+  for (const entry of pendingResults.values()) {
+    const { message } = entry;
+    if (message.requestId === requestId && message.conversationId === conversationId
+        && (message.status === "done" || message.status === "error" || message.status === "needs_user_input")
+        && typeof message.text === "string" && typeof message.ok === "boolean") return entry.promise;
+  }
+}
+
 function retryPendingResults(): void {
   for (const [id, entry] of pendingResults) {
     if (Date.now() - entry.createdAt > RESULT_OUTBOX_TTL_MS) {

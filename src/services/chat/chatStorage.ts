@@ -20,6 +20,17 @@ import { deleteExtensionAssetsByConversation } from './extensionAssetStore';
 import { deleteAgentSessionStoresByConversation } from './agentSessionStore';
 import { deleteContextSpillsByConversation } from './contextSpillStore';
 
+/** Exact user-visible payload retained until the existing bridge outbox is acknowledged. */
+export type StoredMcpTurnResult = {
+  conversationId: string;
+  requestId: string;
+  ok: boolean;
+  text: string;
+  status: 'done' | 'error' | 'needs_user_input';
+  sources?: string[];
+  artifacts?: Array<Record<string, string>>;
+};
+
 export interface StoredMessage {
   id: string;
   conversationId: string;
@@ -439,6 +450,63 @@ class ChatStorageService {
       request.onerror = () => reject(request.error);
     });
     return true;
+  }
+
+  /** Commit the terminal state and its delivery receipt in the same message transaction. */
+  async persistMcpTurnResult(id: string, result: StoredMcpTurnResult): Promise<StoredMessage | undefined> {
+    if (!id || !result.requestId || !result.conversationId) return undefined;
+    const db = await this.ensureDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_MESSAGES, 'readwrite');
+      const store = tx.objectStore(STORE_MESSAGES);
+      let saved: StoredMessage | undefined;
+      const request = store.get(id);
+      request.onsuccess = () => {
+        const row = request.result as StoredMessage | undefined;
+        const raw = row?.toolInput?.mcpTurn;
+        if (!row || row.role !== 'user' || row.conversationId !== result.conversationId || !raw || typeof raw !== 'object') return;
+        const turn = raw as Record<string, unknown>;
+        if (turn.requestId !== result.requestId || turn.requestConversationId !== result.conversationId) return;
+        // The first terminal payload wins; retries cannot replace it with a later error or summary.
+        if (turn.status !== 'running') {
+          const pending = turn.terminalResultPending as StoredMcpTurnResult | undefined;
+          if (pending && typeof pending === 'object' && pending.requestId === result.requestId
+              && pending.conversationId === result.conversationId && pending.status === turn.status) saved = row;
+          return;
+        }
+        saved = { ...row, toolInput: { ...row.toolInput, mcpTurn: { ...turn,
+          status: result.status, summary: result.text.trim().replace(/\s+/g, ' ').slice(0, 180), terminalResultPending: result,
+        } } };
+        store.put(saved);
+      };
+      tx.oncomplete = () => resolve(saved);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  }
+
+  /** A late ACK must never erase a newer request or a different terminal payload. */
+  async clearMcpTurnResult(id: string, result: StoredMcpTurnResult): Promise<void> {
+    if (!id || !result.requestId || !result.conversationId) return;
+    const db = await this.ensureDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_MESSAGES, 'readwrite');
+      const store = tx.objectStore(STORE_MESSAGES);
+      const request = store.get(id);
+      request.onsuccess = () => {
+        const row = request.result as StoredMessage | undefined;
+        const raw = row?.toolInput?.mcpTurn;
+        if (!row || row.role !== 'user' || row.conversationId !== result.conversationId || !raw || typeof raw !== 'object') return;
+        const turn = raw as Record<string, unknown>;
+        if (turn.requestId !== result.requestId || turn.requestConversationId !== result.conversationId || turn.status !== result.status
+            || JSON.stringify(turn.terminalResultPending) !== JSON.stringify(result)) return;
+        const { terminalResultPending: _receipt, ...rest } = turn;
+        store.put({ ...row, toolInput: { ...row.toolInput, mcpTurn: rest } });
+      };
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
   }
 
   /** Atomically preserve terminal turns and reject stale request/context identities. */

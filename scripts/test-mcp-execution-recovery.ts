@@ -25,9 +25,26 @@ function panelVariable(name: string): string {
   assert.ok(node, `actual panel variable ${name} must exist`);
   return node.getText(panelAst);
 }
+function nestedPanelVariable(name: string): string {
+  let found: ts.VariableStatement | undefined;
+  function visit(node: ts.Node) {
+    if (ts.isVariableStatement(node) && node.declarationList.declarations.some((decl) =>
+      ts.isIdentifier(decl.name) && decl.name.text === name)) found = node;
+    ts.forEachChild(node, visit);
+  }
+  visit(panelAst);
+  assert.ok(found, `actual nested panel variable ${name} must exist`);
+  return found.getText(panelAst);
+}
+const reportCode = (await transform([
+  panelFunction("persistMcpTurnStatus"),
+  'const mcpConversationId = "conversation-1", mcpRequestId = "request-1", mcpUserMessageId = "user-1";',
+  "let mcpResultReported = false, mcpReportPending = false;",
+  nestedPanelVariable("reportMcpOnce"), "this.reportOnce = reportMcpOnce;",
+].join("\n"), { loader: "ts", target: "es2022" })).code;
 const panelCode = (await transform([
   panelVariable("recoveringMcpConversations"), panelVariable("MCP_INTERRUPTED_NOTICE"),
-  panelFunction("queueInterruptedMcpTurnResult"), panelFunction("recoverInterruptedMcpTurn"),
+  panelFunction("queueSavedMcpTurnResult"), panelFunction("queueInterruptedMcpTurnResult"), panelFunction("recoverInterruptedMcpTurn"),
   "this.recover = recoverInterruptedMcpTurn; this.queueResult = queueInterruptedMcpTurnResult; this.recovering = recoveringMcpConversations;",
 ].join("\n"), { loader: "ts", target: "es2022" })).code;
 const displayCode = (await transform([
@@ -38,7 +55,7 @@ const displayCode = (await transform([
 const storageAst = ts.createSourceFile("chatStorage.ts", readFileSync("src/services/chat/chatStorage.ts", "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 const storageClass = storageAst.statements.find((node): node is ts.ClassDeclaration => ts.isClassDeclaration(node) && node.name?.text === "ChatStorageService");
 assert.ok(storageClass, "actual storage class must exist");
-const storageMethods = ["markMcpTurnInterrupted", "clearMcpTurnInterruptionResult"].map((name) => {
+const storageMethods = ["persistMcpTurnResult", "clearMcpTurnResult", "markMcpTurnInterrupted", "clearMcpTurnInterruptionResult"].map((name) => {
   const method = storageClass.members.find((node): node is ts.MethodDeclaration => ts.isMethodDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === name);
   assert.ok(method, `actual atomic storage method ${name} must exist`);
   return method.getText(storageAst);
@@ -54,10 +71,18 @@ const runningUser = (patch: any = {}) => ({
 });
 function turn(row: any): any { return row.toolInput.mcpTurn; }
 const publicOutput = () => ({ id: "answer-1", conversationId: cid, role: "assistant", content: "已保存的正文 https://example.com/source", timestamp: 2 });
+const terminalPayload = (status = "done") => ({ conversationId: cid, requestId: rid, ok: status !== "error",
+  text: `exact ${status} output\n${"正文".repeat(300)}`, status,
+  sources: ["https://example.com/source"], artifacts: [{ type: "FILE_CARD", title: "report.pdf", url: "https://example.com/report.pdf" }] });
+const terminalUser = (status = "done") => {
+  const user = runningUser();
+  Object.assign(turn(user), { status, terminalResultPending: terminalPayload(status) });
+  return user;
+};
 
 function makeStorage(initialRows: any[]) {
   const rows = new Map<string, any>(initialRows.map((row) => [row.id, copy(row)]));
-  const fixture: any = { rows, writes: 0, transactions: 0, beforeRead: undefined, failTransaction: false };
+  const fixture: any = { rows, writes: 0, transactions: 0, beforeRead: undefined, failTransaction: false, destroyAfterCommit: false };
   const db = { transaction(name: string, mode: string) {
     assert.equal(name, "messages"); assert.equal(mode, "readwrite"); fixture.transactions++;
     const tx: any = { error: null };
@@ -72,7 +97,7 @@ function makeStorage(initialRows: any[]) {
             request.onsuccess?.();
             if (fixture.failTransaction) throw new Error("fixture transaction aborted");
             for (const [id, row] of staged) { rows.set(id, row); fixture.writes++; }
-            tx.oncomplete?.();
+            if (!fixture.destroyAfterCommit) tx.oncomplete?.();
           } catch (error) { tx.error = error; tx.onabort?.(); }
         });
         return request;
@@ -88,7 +113,12 @@ function makeStorage(initialRows: any[]) {
   storage.ensureDb = async () => db;
   storage.getMessagesByConversation = async (convId: string) => [...rows.values()].filter((row) => row.conversationId === convId).sort((a, b) => a.timestamp - b.timestamp).map(copy);
   storage.getMessage = async (id: string) => rows.has(id) ? copy(rows.get(id)) : undefined;
-  storage.updateMessage = async (id: string, patch: any) => { if (!rows.has(id)) return false; rows.set(id, { ...rows.get(id), ...copy(patch) }); return true; };
+  storage.updateMessage = async (id: string, patch: any) => {
+    if (!rows.has(id)) return false;
+    rows.set(id, { ...rows.get(id), ...copy(patch) });
+    if (fixture.destroyAfterCommit) return new Promise(() => {});
+    return true;
+  };
   return { ...fixture, fixture, storage, rows };
 }
 
@@ -110,13 +140,17 @@ function makePanel(initialRows = [runningUser()]) {
     getContext: () => ({ browser: { runtime } }),
     isConversationLoading: () => fixture.loading,
     hasPendingMcpTerminalResult: (requestId: string, convId: string) => fixture.outbox.has(`${requestId}:${convId}`),
+    getPendingMcpTerminalResultAck: () => fixture.ack(),
     reportMcpExternalResult: (payload: any) => { fixture.reports.push(copy(payload)); return fixture.ack(); },
+    getMessageById: (id: string) => fixture.panelMessages.get(id),
     clearDoingToolCallsInIdb: async (ids: string[]) => { fixture.clearCalls.push([...ids]); },
     getMcpExecutionContextState, decideMcpExecutionRecovery, assembleMcpTurnResult,
     cloneTurnActivityTrace, finishTurnActivityTrace,
     console: { warn: (...args: any[]) => fixture.warnings.push(args) },
   };
+  fixture.panelMessages = new Map(initialRows.map((row) => [row.id, copy(row)]));
   runInNewContext(panelCode, state);
+  runInNewContext(reportCode, state);
   return { state, fixture, db, recover: () => state.recover(cid), queue: (user: any, output: any[]) => state.queueResult(user, output) };
 }
 
@@ -140,6 +174,158 @@ async function bounded<T>(promise: Promise<T>): Promise<T> {
 }
 let checks = 0;
 async function check(name: string, run: () => void | Promise<void>) { await run(); checks++; console.log(`PASS ${name}`); }
+
+await check("normal terminal commit survives renderer destruction before outbox queue", async () => {
+  for (const status of ["done", "error", "needs_user_input"]) {
+    const abandoned = makePanel();
+    abandoned.db.fixture.destroyAfterCommit = true;
+    const result = { text: `exact ${status} result\n\nsecond paragraph`, status,
+      sources: ["https://example.com/source"], artifacts: [{ type: "FILE_CARD", title: "report.pdf", url: "https://example.com/report.pdf" }] };
+    void abandoned.state.reportOnce(status !== "error", result.text, status, result);
+    await settle();
+    assert.equal(turn(abandoned.db.rows.get("user-1")).status, status);
+    assert.equal(abandoned.fixture.reports.length, 0, "renderer ended before queueing");
+    const reloaded = makePanel([...abandoned.db.rows.values()]);
+    reloaded.fixture.ack = () => new Promise(() => {});
+    await bounded(reloaded.recover());
+    assert.deepEqual(reloaded.fixture.reports, [{ conversationId: cid, requestId: rid,
+      ok: status !== "error", ...result }], "reload must deliver the precise persisted terminal payload");
+    assert.equal(reloaded.fixture.ownerQueries, 0);
+  }
+});
+
+await check("normal terminal ACK clears the receipt while failed ACK keeps the full payload", async () => {
+  for (const status of ["done", "error", "needs_user_input"]) {
+    for (const acknowledged of [true, false]) {
+      const panel = makePanel();
+      panel.fixture.ack = () => Promise.resolve(acknowledged);
+      const result = terminalPayload(status);
+      await panel.state.reportOnce(result.ok, result.text, status, result);
+      const saved = turn(panel.db.rows.get("user-1"));
+      assert.equal(saved.status, status);
+      assert.deepEqual(saved.terminalResultPending, acknowledged ? undefined : result);
+      assert.equal(saved.summary.length, 180);
+      assert.deepEqual(panel.fixture.reports, [result]);
+    }
+  }
+});
+
+await check("terminal recovery works without an execution owner and preserves prior turns", async () => {
+  const user = terminalUser(); delete turn(user).executionContextId;
+  const ordinary = { ...runningUser({ id: "user-2", timestamp: 3 }), toolInput: {} };
+  const panel = makePanel([user, publicOutput(), ordinary]); panel.fixture.loading = true;
+  panel.state.abortControllersByConversation.set(cid, new AbortController());
+  panel.fixture.ack = () => new Promise(() => {});
+  await bounded(panel.recover());
+  assert.deepEqual(panel.fixture.reports, [terminalPayload()]);
+  assert.equal(panel.fixture.ownerQueries, 0);
+  assert.deepEqual(panel.db.rows.get("user-2"), ordinary);
+  panel.fixture.outbox.add(`${rid}:${cid}`);
+  await panel.recover(); await panel.recover();
+  assert.equal(panel.fixture.reports.length, 1, "outbox owns repeated recovery until ACK");
+});
+
+await check("reloaded terminal ACK cleanup is exact; failures and rejection remain recoverable", async () => {
+  for (const ack of ["success", "false", "rejected"]) {
+    const panel = makePanel([terminalUser()]);
+    panel.fixture.ack = () => ack === "rejected" ? Promise.reject(new Error("bridge unavailable")) : Promise.resolve(ack === "success");
+    await panel.recover(); await settle();
+    assert.deepEqual(turn(panel.db.rows.get("user-1")).terminalResultPending, ack === "success" ? undefined : terminalPayload());
+    if (ack === "success") { await panel.recover(); assert.equal(panel.fixture.reports.length, 1); }
+  }
+});
+
+await check("restored outbox ACK clears the durable receipt without requeueing", async () => {
+  const panel = makePanel([terminalUser()]); panel.fixture.outbox.add(`${rid}:${cid}`);
+  let acknowledge!: (value: boolean) => void;
+  const existingAck = new Promise<boolean>((resolve) => { acknowledge = resolve; });
+  panel.fixture.ack = () => existingAck;
+  await panel.recover();
+  assert.equal(panel.fixture.reports.length, 0);
+  assert.deepEqual(turn(panel.db.rows.get("user-1")).terminalResultPending, terminalPayload());
+  acknowledge(true); await settle();
+  assert.equal(turn(panel.db.rows.get("user-1")).terminalResultPending, undefined);
+  panel.fixture.outbox.clear(); await panel.recover();
+  assert.equal(panel.fixture.reports.length, 0);
+});
+
+await check("unreadable outbox retains the terminal receipt without overwriting delivery", async () => {
+  const panel = makePanel([terminalUser()]); panel.fixture.outbox.add(`${rid}:${cid}`);
+  panel.state.getPendingMcpTerminalResultAck = () => undefined;
+  await panel.recover();
+  assert.equal(panel.fixture.reports.length, 0);
+  assert.deepEqual(turn(panel.db.rows.get("user-1")).terminalResultPending, terminalPayload());
+});
+
+await check("terminal receipts with changed identities or state are never replayed", async () => {
+  for (const change of ["request", "receipt-request", "conversation", "receipt-conversation", "state", "assistant", "missing", "malformed"]) {
+    const user = terminalUser();
+    if (change === "request") turn(user).requestId = "new-request";
+    if (change === "receipt-request") turn(user).terminalResultPending.requestId = "old-request";
+    if (change === "conversation") turn(user).requestConversationId = "other";
+    if (change === "receipt-conversation") turn(user).terminalResultPending.conversationId = "other";
+    if (change === "state") turn(user).status = "needs_user_input";
+    if (change === "assistant") user.role = "assistant";
+    if (change === "missing") delete turn(user).terminalResultPending;
+    if (change === "malformed") turn(user).terminalResultPending = "broken";
+    const panel = makePanel([user]); await panel.recover();
+    assert.equal(panel.fixture.reports.length, 0, change);
+    assert.deepEqual(panel.db.rows.get("user-1"), user);
+  }
+});
+
+await check("terminal persistence checks current identity atomically and the first terminal wins", async () => {
+  for (const change of ["request", "conversation", "meta-conversation", "assistant", "terminal", "missing"]) {
+    const panel = makePanel(); const before = copy(panel.db.rows.get("user-1"));
+    panel.db.fixture.beforeRead = () => {
+      const row = panel.db.rows.get("user-1");
+      if (change === "request") turn(row).requestId = "new-request";
+      if (change === "conversation") row.conversationId = "migrated";
+      if (change === "meta-conversation") turn(row).requestConversationId = "migrated";
+      if (change === "assistant") row.role = "assistant";
+      if (change === "terminal") turn(row).status = "error";
+      if (change === "missing") panel.db.rows.delete("user-1");
+    };
+    await panel.state.reportOnce(true, "old output", "done");
+    assert.equal(panel.fixture.reports.length, 0, change);
+    assert.equal(panel.db.fixture.writes, 0);
+    assert.notDeepEqual(panel.db.rows.get("user-1"), before);
+  }
+  const panel = makePanel([terminalUser()]); panel.fixture.ack = () => Promise.resolve(false);
+  await panel.state.reportOnce(false, "late conflicting error", "error");
+  assert.deepEqual(panel.fixture.reports, [terminalPayload()]);
+  assert.deepEqual(turn(panel.db.rows.get("user-1")).terminalResultPending, terminalPayload());
+});
+
+await check("late ACK cannot clear a replaced terminal receipt or migrated message", async () => {
+  for (const change of ["none", "request", "conversation", "meta-conversation", "state", "payload", "assistant", "cleared"]) {
+    const user = terminalUser();
+    const db = makeStorage([user]);
+    db.fixture.beforeRead = () => {
+      const row = db.rows.get("user-1");
+      if (change === "request") turn(row).requestId = "new-request";
+      if (change === "conversation") row.conversationId = "migrated";
+      if (change === "meta-conversation") turn(row).requestConversationId = "migrated";
+      if (change === "state") turn(row).status = "running";
+      if (change === "payload") turn(row).terminalResultPending.text = "new payload";
+      if (change === "assistant") row.role = "assistant";
+      if (change === "cleared") delete turn(row).terminalResultPending;
+    };
+    await db.storage.clearMcpTurnResult("user-1", terminalPayload());
+    assert.equal(db.fixture.writes, change === "none" ? 1 : 0, change);
+    if (change === "none") assert.equal(turn(db.rows.get("user-1")).terminalResultPending, undefined);
+    else if (change !== "cleared") assert.ok(turn(db.rows.get("user-1")).terminalResultPending);
+  }
+});
+
+await check("aborted terminal commit leaves a running row and still uses the existing outbox path", async () => {
+  const panel = makePanel(); panel.db.fixture.failTransaction = true; panel.fixture.ack = () => Promise.resolve(false);
+  await panel.state.reportOnce(true, "outbox-only result", "done");
+  assert.equal(turn(panel.db.rows.get("user-1")).status, "running");
+  assert.equal(turn(panel.db.rows.get("user-1")).terminalResultPending, undefined);
+  assert.equal(panel.fixture.reports[0].text, "outbox-only result");
+  assert.equal(panel.fixture.warnings.length, 1);
+});
 
 await check("browser-proven missing owner marks error durably and queues the precise public result", async () => {
   const panel = makePanel([runningUser(), publicOutput()]);

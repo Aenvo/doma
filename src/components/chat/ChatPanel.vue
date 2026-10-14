@@ -903,7 +903,7 @@ import { localDecrypt, localEncrypt } from "@/utils/localCrypto";
 
 import { renderUserPlainTextAsBubbleHtml } from "@/services/chat/ChatMarkdownRenderer";
 import { llmManager, type LlmProvider, type LlmResponse, DEFAULT_MODELS } from "@/services/chat/llm/entry";
-import { chatStorage, newChatMessageId, type StoredConversation, type StoredMessage } from "@/services/chat/chatStorage";
+import { chatStorage, newChatMessageId, type StoredConversation, type StoredMessage, type StoredMcpTurnResult } from "@/services/chat/chatStorage";
 import CustomUIRenderer from "./CustomUIRenderer.vue";
 import AssistantMessageContent from "./AssistantMessageContent.vue";
 import TurnActivityTraceView from "./TurnActivityTrace.vue";
@@ -953,6 +953,7 @@ import {
   DOMA_MCP_BRIDGE_PORT,
   isMcpBridgeConnected,
   hasPendingMcpTerminalResult,
+  getPendingMcpTerminalResultAck,
   sendMcpBridgeAccepted,
   sendMcpBridgeResult,
   sendMcpBridgeRunning,
@@ -4846,21 +4847,34 @@ function mcpTurnTarget(msg: ChatMessage): string {
   return [target.targetTitle, target.targetUrl].filter((value) => typeof value === "string" && value).join(" · ");
 }
 
-async function persistMcpTurnStatus(messageId: string, status: string, text: string): Promise<void> {
-  if (!messageId) return;
-  const stored = await chatStorage.getMessage(messageId);
+async function persistMcpTurnStatus(messageId: string, result: StoredMcpTurnResult): Promise<StoredMcpTurnResult | undefined> {
+  if (!messageId || !result.requestId) return result;
+  const stored = await chatStorage.persistMcpTurnResult(messageId, result);
   if (!stored) return;
-  const current = stored.toolInput?.mcpTurn;
-  const meta = current && typeof current === "object" ? current as Record<string, unknown> : {};
-  const summary = text.trim().replace(/\s+/g, " ").slice(0, 180);
-  const toolInput = { ...stored.toolInput, mcpTurn: { ...meta, status, summary } };
-  await chatStorage.updateMessage(messageId, { toolInput });
   const panel = getMessageById(messageId);
-  if (panel) panel.toolInput = toolInput;
+  if (panel) panel.toolInput = stored.toolInput;
+  const turn = stored.toolInput?.mcpTurn as Record<string, unknown>;
+  return turn.terminalResultPending as StoredMcpTurnResult;
 }
 
 const recoveringMcpConversations = new Set<string>();
 const MCP_INTERRUPTED_NOTICE = "侧栏已重建，上一轮执行中断；已保存内容仍保留。请明确重试。";
+/** Terminal receipts do not require owner-loss inference or reconstruction from transcript text. */
+function queueSavedMcpTurnResult(user: StoredMessage): void {
+  const turn = user.toolInput?.mcpTurn as Record<string, unknown> | undefined;
+  const result = turn?.terminalResultPending as StoredMcpTurnResult | undefined;
+  if (!result || typeof result !== "object" || !["done", "error", "needs_user_input"].includes(result.status)
+      || typeof result.text !== "string" || typeof result.ok !== "boolean" || !result.requestId
+      || result.requestId !== turn?.requestId || result.status !== turn?.status
+      || result.conversationId !== user.conversationId || turn?.requestConversationId !== user.conversationId) return;
+  // Subscribe to an already restored outbox without overwriting ambiguous/unreadable records.
+  const delivery = hasPendingMcpTerminalResult(result.requestId, result.conversationId)
+    ? getPendingMcpTerminalResultAck(result.requestId, result.conversationId) : reportMcpExternalResult(result);
+  if (!delivery) return;
+  void delivery.then((acknowledged) => {
+    if (acknowledged) return chatStorage.clearMcpTurnResult(user.id, result);
+  }).catch((error) => console.warn("[ChatPanel] terminal result remains pending", error));
+}
 /** The durable pending flag closes the gap between marking an interruption and queueing its result. */
 function queueInterruptedMcpTurnResult(user: StoredMessage, savedOutput: StoredMessage[]): void {
   const turn = user.toolInput?.mcpTurn as Record<string, unknown>;
@@ -4886,10 +4900,14 @@ async function recoverInterruptedMcpTurn(convId: string): Promise<void> {
         && Array.isArray(context.groupTabs) && context.groupTabs.includes(panelHostTabId)
   );
   if (!ownsPanelTab) return;
-  if (recoveringMcpConversations.has(convId) || isConversationLoading(convId) || abortControllersByConversation.has(convId)) return;
+  if (recoveringMcpConversations.has(convId)) return;
   recoveringMcpConversations.add(convId);
   try {
     const rows = await chatStorage.getMessagesByConversation(convId);
+    for (const row of rows) {
+      if (row.role === "user") queueSavedMcpTurnResult(row);
+    }
+    if (isConversationLoading(convId) || abortControllersByConversation.has(convId)) return;
     const userIndex = rows.findLastIndex((row) => row.role === "user");
     const user = rows[userIndex];
     const raw = user?.toolInput?.mcpTurn;
@@ -7542,19 +7560,27 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
   ) => {
     if (!mcpConversationId || mcpResultReported || mcpReportPending) return;
     mcpReportPending = true;
-    try {
-      await persistMcpTurnStatus(mcpUserMessageId, status, text);
-    } catch (error) {
-      console.warn("[ChatPanel] MCP turn status persistence failed", error);
-    }
-    const acknowledged = await reportMcpExternalResult({
-      conversationId: mcpConversationId,
-      ...(mcpRequestId ? { requestId: mcpRequestId } : {}),
-      ok, text, status,
+    let payload: StoredMcpTurnResult = {
+      conversationId: mcpConversationId, requestId: mcpRequestId, ok, text, status,
       ...(result ? { sources: result.sources, artifacts: result.artifacts } : {}),
-    });
-    mcpResultReported = acknowledged;
-    mcpReportPending = false;
+    };
+    try {
+      try {
+        const saved = await persistMcpTurnStatus(mcpUserMessageId, payload);
+        if (!saved) return;
+        payload = saved;
+      } catch (error) {
+        console.warn("[ChatPanel] MCP turn status persistence failed", error);
+      }
+      const acknowledged = await reportMcpExternalResult(payload);
+      mcpResultReported = acknowledged;
+      if (acknowledged) {
+        try { await chatStorage.clearMcpTurnResult(mcpUserMessageId, payload); }
+        catch (error) { console.warn("[ChatPanel] acknowledged terminal receipt cleanup failed", error); }
+      }
+    } finally {
+      mcpReportPending = false;
+    }
   };
 
   if (!isResend && !opts?.skipUserMessage) {

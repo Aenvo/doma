@@ -63,6 +63,9 @@ try {
   await tick();
   const first = bridge.sendMcpBridgeResult({ conversationId: "conv", requestId: "turn-1", ok: true, text: "完成", status: "done" });
   await tick();
+  assert.equal(bridge.getPendingMcpTerminalResultAck("turn-1", "conv"), first);
+  assert.equal(bridge.getPendingMcpTerminalResultAck("turn-1", "other-conv"), undefined);
+  assert.equal(bridge.getPendingMcpTerminalResultAck("other-turn", "conv"), undefined);
   assert.equal(bridge.hasPendingMcpTerminalResult("turn-1", "conv"), true);
   assert.equal(bridge.hasPendingMcpTerminalResult("turn-1", "other-conv"), false);
   assert.equal(bridge.hasPendingMcpTerminalResult("other-turn", "conv"), false);
@@ -83,6 +86,7 @@ try {
   assert.equal(await first, true);
   assert.deepEqual(outboxIds(), []);
   assert.equal(bridge.hasPendingMcpTerminalResult("turn-1", "conv"), false);
+  assert.equal(bridge.getPendingMcpTerminalResultAck("turn-1", "conv"), undefined);
 
   bridge.startMcpBridgeClient(() => {}, [bridge.DOMA_MCP_BRIDGE_PORT, bridge.DOMA_CLI_BRIDGE_PORT]);
   await tick();
@@ -360,6 +364,61 @@ try {
     localStorage.getItem = originalGetItem;
   }
   assert.equal(probe.hasPendingMcpTerminalResult("probe-request", "probe-conv"), false);
+
+  // Receipt recovery can subscribe to a durable result before client startup,
+  // then keep the exact same ACK promise after startup restores its outbox.
+  for (const status of ["done", "error", "needs_user_input"]) {
+    const requestId = `ack-${status}`, conversationId = "ack-conversation", resultId = `result-${status}`;
+    const message = { type: "result", resultId, requestId, conversationId, status, ok: status !== "error", text: `saved ${status}` };
+    const record = JSON.stringify({ message, createdAt: Date.now(), port: 3847 });
+    saved.set(outboxKey(resultId), record);
+    const subscribing = await loadPanel();
+    const beforeSockets = FakeWebSocket.sockets.length;
+    assert.equal(subscribing.getPendingMcpTerminalResultAck(requestId, "other"), undefined);
+    assert.equal(subscribing.getPendingMcpTerminalResultAck("other", conversationId), undefined);
+    assert.equal(subscribing.getPendingMcpTerminalResultAck("", conversationId), undefined);
+    assert.equal(subscribing.getPendingMcpTerminalResultAck(requestId, "  "), undefined);
+    const ack = subscribing.getPendingMcpTerminalResultAck(requestId, conversationId);
+    assert.ok(ack, "durable receipt must expose its ACK promise before socket startup");
+    assert.equal(FakeWebSocket.sockets.length, beforeSockets);
+    assert.equal(saved.get(outboxKey(resultId)), record);
+    subscribing.startMcpBridgeClient(() => {}, [subscribing.DOMA_MCP_BRIDGE_PORT]);
+    await tick();
+    assert.equal(subscribing.getPendingMcpTerminalResultAck(requestId, conversationId), ack);
+    const ackSocket = FakeWebSocket.sockets.at(-1)!;
+    assert.equal(ackSocket.sent.find((item) => item.resultId === resultId)?.text, message.text);
+    let completed = false;
+    void ack.then((value) => { completed = value; });
+    await tick();
+    assert.equal(completed, false);
+    ackSocket.receive({ type: "result_ack", resultId: "wrong-result" });
+    await tick();
+    assert.equal(completed, false);
+    assert.equal(saved.get(outboxKey(resultId)), record);
+    ackSocket.receive({ type: "result_ack", resultId });
+    assert.equal(await ack, true);
+    assert.equal(saved.has(outboxKey(resultId)), false);
+    assert.equal(subscribing.getPendingMcpTerminalResultAck(requestId, conversationId), undefined);
+    subscribing.stopMcpBridgeClient();
+  }
+
+  // Unknown, malformed and non-terminal records never expose a terminal ACK.
+  const unknownAck = await loadPanel();
+  assert.equal(unknownAck.getPendingMcpTerminalResultAck("absent", "absent"), undefined);
+  saved.set(outboxKey("broken-ack"), "broken JSON");
+  assert.equal(unknownAck.getPendingMcpTerminalResultAck("broken-ack", "ack-conversation"), undefined);
+  assert.equal(saved.get(outboxKey("broken-ack")), "broken JSON");
+  saved.delete(outboxKey("broken-ack"));
+  for (const patch of [{ status: "running" }, { text: null }, { ok: undefined }]) {
+    const invalidMessage = { type: "result", resultId: "invalid-ack", requestId: "invalid-request", conversationId: "ack-conversation", status: "done", ok: true, text: "saved", ...patch };
+    const invalidRecord = JSON.stringify({ message: invalidMessage, createdAt: Date.now(), port: 3847 });
+    saved.set(outboxKey("invalid-ack"), invalidRecord);
+    const invalidAck = await loadPanel();
+    assert.equal(invalidAck.getPendingMcpTerminalResultAck("invalid-request", "ack-conversation"), undefined);
+    assert.equal(saved.get(outboxKey("invalid-ack")), invalidRecord);
+    invalidAck.stopMcpBridgeClient();
+    saved.delete(outboxKey("invalid-ack"));
+  }
   console.log("MCP result ACK, reconnect, multi-panel persistence, migration, TTL, ownership and read-only terminal recovery probe passed");
 } finally {
   Date.now = originalNow;
