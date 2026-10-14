@@ -59,6 +59,17 @@ check('separate bare URL lines remain separate exact links', () => {
   assert.match(html, /<\/a><br>\s*<a\b/);
 });
 
+check('a bare URL between independent markdown links ends before the following line', () => {
+  const bare = 'https://example.test/';
+  const html = render(`[前文](https://previous.test/)\n${bare}\nMARKER\n[后文](https://next.test/)`);
+  assert.deepEqual(links(html), [
+    { href: 'https://previous.test/', text: '前文' },
+    { href: bare, text: bare },
+    { href: 'https://next.test/', text: '后文' },
+  ]);
+  assert.match(html, /<\/a><br>\s*MARKER/);
+});
+
 check('an ASCII soft wrap preserves the space between words', () => {
   assert.equal(plainText(render('Hello\nworld')), 'Hello world\n');
 });
@@ -81,6 +92,24 @@ check('a multiline markdown link destination keeps its label and exact single li
 check('a URL in a multiline markdown label does not replace the actual destination', () => {
   const html = render('[\nhttps://example.com/\n](https://example.org/target)');
   assert.deepEqual(links(html), [{ href: 'https://example.org/target', text: 'https://example.com/' }]);
+});
+
+check('closed nested brackets before a label URL do not end the enclosing label', () => {
+  const html = render('[说明 [子项] https://example.com/](https://example.org/target)');
+  assert.deepEqual(links(html), [{
+    href: 'https://example.org/target', text: '说明 [子项] https://example.com/',
+  }]);
+});
+
+check('escaped label brackets keep the URL inside its enclosing markdown link', () => {
+  const before = render('[说明 \\] https://example.com/](https://example.org/target)');
+  assert.deepEqual(links(before), [{
+    href: 'https://example.org/target', text: '说明 ] https://example.com/',
+  }]);
+  const after = render('[https://example.com/ \\[说明](https://example.org/target)');
+  assert.deepEqual(links(after), [{
+    href: 'https://example.org/target', text: 'https://example.com/ [说明',
+  }]);
 });
 
 check('a URL in multiline image alt text remains an image with its original source', () => {

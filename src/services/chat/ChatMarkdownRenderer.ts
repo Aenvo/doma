@@ -103,15 +103,38 @@ function isUrlInMarkdownLinkDest(full: string, offset: number): boolean {
 
 /** `[http://label](dest)` 中 label 内的 URL 不应再 autolink，否则会破坏 markdown 链接 */
 function isUrlInMarkdownLinkLabel(full: string, offset: number, rawLength: number): boolean {
+  const isEscapedBracket = (index: number) => {
+    let slashes = 0;
+    while (index > 0 && full[--index] === "\\") slashes++;
+    return slashes % 2 === 1;
+  };
+
+  // Find an enclosing label, skipping complete bracket pairs from earlier links.
+  let depth = 0;
   let i = offset - 1;
-  while (i >= 0 && full[i] !== "[") {
+  while (i >= 0) {
+    const char = full[i];
+    if ((char === "[" || char === "]") && !isEscapedBracket(i)) {
+      if (char === "]") depth++;
+      else if (depth > 0) depth--;
+      else break;
+    }
     i--;
   }
   if (i < 0 || full[i] !== "[") return false;
 
   const urlEnd = offset + rawLength;
   let j = urlEnd;
-  while (j < full.length && full[j] !== "]") j++;
+  depth = 0;
+  while (j < full.length) {
+    const char = full[j];
+    if ((char === "[" || char === "]") && !isEscapedBracket(j)) {
+      if (char === "[") depth++;
+      else if (depth > 0) depth--;
+      else break;
+    }
+    j++;
+  }
   if (j >= full.length || full[j] !== "]") return false;
 
   j++;
