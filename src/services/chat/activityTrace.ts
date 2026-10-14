@@ -38,7 +38,8 @@ export function reopenTurnActivityTrace(
   if (trace.status === "completed") {
     trace.status = "running";
     trace.finishedAt = undefined;
-    trace.expanded = true;
+    // Resuming after provisional text must not automatically expose tool activity.
+    trace.expanded = false;
   }
   trace.phase = phase;
 }
