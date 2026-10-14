@@ -10,6 +10,7 @@ import {
 } from './llmTypes';
 import { LlmService } from './llmService';
 import { resolveOutputTokenLimit } from './responsePolicy';
+import { resolveCompatibleToolChoice } from './toolChoiceCompatibility';
 import {
   appendRuntimeControl,
   type LlmRequestControl,
@@ -112,17 +113,25 @@ export class OpenAICompatibleService extends LlmService {
 
     const tokenLimit = resolveOutputTokenLimit({ model: this.model, extraBody: this.extraBody });
     const { max_tokens: _maxTokens, max_completion_tokens: _maxCompletionTokens, ...extraBody } = this.extraBody;
+    // Consume the one-round recovery request even when tools are disabled or unavailable.
+    const requestedMode = this.consumeToolChoice();
+    const toolChoice = resolveCompatibleToolChoice({
+      endpoint: this.completionsUrl,
+      requestedMode,
+      explicitToolChoice: extraBody.tool_choice,
+      extraBody,
+    });
     const requestBody = {
       model: this.model,
       messages,
       stream: true,
       ...extraBody,
       [tokenLimit.field]: tokenLimit.value,
-      ...(requestControl.disableTools
+      ...(requestControl.disableTools || tools.length === 0
         ? { tools: undefined, tool_choice: undefined }
         : {
             tools,
-            ...(this.consumeToolChoice() === "required" ? { tool_choice: "required" } : {}),
+            tool_choice: toolChoice,
           }),
     };
 

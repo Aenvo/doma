@@ -17,8 +17,10 @@ const mocks: Record<string, string> = {
   interactionBlockSendHints: `export const prepareUserSendText=x=>x;`,
   askModeToolPolicy: `export const isAskModeRound=()=>false; export const isAskBlockedPageTool=()=>false;
     export const buildAskPageToolBlockedPayload=()=>({}); export const getLastUserVisibleGoal=()=>'';`,
-  textOnlyToolRecovery: `export function clearTextOnlyToolRecovery(){} export function markTextOnlyToolRecoveryUsed(){}
-    export async function shouldForceToolRecovery(){globalThis.__recoveryChecks++;return !!globalThis.__forceRecovery}
+  textOnlyToolRecovery: `const recovered=new Set();
+    export function clearTextOnlyToolRecovery(id){recovered.delete(id)}
+    export function markTextOnlyToolRecoveryUsed(id){recovered.add(id)}
+    export async function shouldForceToolRecovery(input){globalThis.__recoveryChecks++;return !!globalThis.__forceRecovery&&!recovered.has(input.conversationId)}
     export const buildToolRecoveryNudgeMessage=()=>'';`,
   browserToolRuntimeClient: `export async function callBrowserToolViaRuntime(){globalThis.__toolCalls++;return {ok:true,title:'fixture'}}`,
   slashSkills: `export async function buildBrowserAssistantSystemPromptParts(){return {systemContent:'',basePrompt:'',skillSection:''}}`,
@@ -227,6 +229,36 @@ try {
       assert.equal(body[field === 'max_tokens' ? 'max_completion_tokens' : 'max_tokens'], undefined);
       if ('enable_thinking' in extraBody) assert.equal(body.enable_thinking, extraBody.enable_thinking);
     }
+  });
+  await check('DeepSeek text-only recovery keeps thinking and tool execution without a rejected required choice', async () => {
+    (globalThis as any).__forceRecovery = true;
+    (globalThis as any).__toolCalls = 0;
+    (globalThis as any).__recoveryChecks = 0;
+    const client = { getLlmTools: async () => [{ type: 'function', function: { name: 'browser_get_current_tab', parameters: { type: 'object', properties: {} } } }] };
+    const service = new services.OpenAICompatibleService('', 'deepseek-flash', client, 'https://api.deepseek.com/v1', { extraBody: { thinking: { type: 'enabled' }, max_tokens: 512 } });
+    const first = 'data: {"choices":[{"delta":{"reasoning_content":"fixture reasoning one","content":"Let me check the page."},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n';
+    const tool = 'data: {"choices":[{"delta":{"reasoning_content":"fixture reasoning two","tool_calls":[{"index":0,"id":"call-compat","type":"function","function":{"name":"browser_get_current_tab","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}\n\ndata: [DONE]\n\n';
+    const responses = [response(first), response(tool), response(frames('openai', 'Completed.'))];
+    const bodies: any[] = [], text: string[] = [], errors: Error[] = [];
+    globalThis.fetch = async (_url, init) => {
+      const body = JSON.parse(init!.body as string); bodies.push(body);
+      assert.equal(body.tool_choice, undefined, 'thinking-mode server would reject required');
+      assert.deepEqual(body.thinking, { type: 'enabled' });
+      assert.equal(body.max_tokens, 512);
+      assert.ok(responses.length, 'recovery must stay bounded');
+      return responses.shift()!;
+    };
+    await service.sendMessage('deepseek-recovery-fixture', '', '', '', '', 'Read the page title', {
+      onConversationStart() {}, onConversationDone() {}, onMessageStart() {}, onMessageDone() {},
+      onTextMessage(_c: string, _m: string, chunk: string) { text.push(chunk); },
+      onMessageError(_c: string, _m: string, error: Error) { errors.push(error); },
+      onToolCallStart() {}, onToolCallOverride: async () => undefined, onToolCallDone() {},
+    }, new AbortController().signal);
+    assert.equal(bodies.length, 3); assert.equal(errors.length, 0);
+    assert.deepEqual(text, ['Completed.']); assert.equal((globalThis as any).__toolCalls, 1);
+    assert.ok(bodies[1].messages.some((message: any) => message.reasoning_content === 'fixture reasoning one'));
+    assert.ok(bodies[2].messages.some((message: any) => message.reasoning_content === 'fixture reasoning two'));
+    (globalThis as any).__forceRecovery = false;
   });
   await check('final response completion awaits durable full-body reconciliation', async () => {
     const fixture = make('openai'); queue(response(frames('openai', 'full body')));
