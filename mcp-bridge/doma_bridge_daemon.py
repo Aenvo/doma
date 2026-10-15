@@ -33,7 +33,7 @@ from xml.sax.saxutils import escape as xml_escape
 
 from bridge_auth import load_or_create_token
 
-SERVER_VERSION = "0.7.10"
+SERVER_VERSION = "0.7.11"
 BRIDGE_PROTOCOL_VERSION = 1
 CONTROL_PORT = int(os.environ.get("DOMA_CONTROL_PORT", "3846"))
 BRIDGE_PORT = int(os.environ.get("DOMA_BRIDGE_PORT", "3847"))
@@ -870,6 +870,14 @@ def close_conversation(
     now = time.time()
     event = threading.Event()
     with _TASKS_LOCK:
+        # Reserve a single close before dispatch: pending closes may not yet
+        # have bound _TASKS, and replacing either state strands its waiter.
+        active_close = next((req for req in _REQUESTS.values()
+            if req.get("operation") == "close" and req.get("conversationId") == cid
+            and req.get("status") in ("pending", "running")), None)
+        if active_close is not None:
+            return _payload(False, "该会话已有关闭请求正在执行", conversationId=cid,
+                requestId=active_close.get("requestId"), status="error", callerAgent=caller)
         _REQUESTS[request_id] = {
             "requestId": request_id,
             "conversationId": cid,

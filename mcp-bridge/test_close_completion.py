@@ -58,6 +58,47 @@ class CloseCompletionTests(unittest.TestCase):
             self.assertTrue(daemon.dispatch_close_to_doma(self.rid, self.cid, "fixture")["ok"])
         self.assertEqual(sent[0]["completionToken"], self.token)
 
+    def test_concurrent_close_cannot_replace_pending_or_running_close(self):
+        for status in ("pending", "running"):
+            with self.subTest(status=status):
+                daemon._REQUESTS.clear()
+                daemon._REQUEST_TO_CONVERSATION.clear()
+                daemon._TASKS[self.cid].update(requestId="previous", status="done")
+                dispatched, release = threading.Event(), threading.Event()
+                outcomes = []
+
+                def dispatch(rid, cid, _caller):
+                    claim = {"requestId": rid, "conversationId": cid,
+                             "completionToken": daemon._REQUESTS[rid]["completionToken"]}
+                    if status == "running":
+                        daemon._claim_close_completion(claim)
+                    dispatched.set()
+                    release.wait(2)
+                    daemon._claim_close_completion(claim)
+                    daemon._apply_extension_result({"requestId": rid, "conversationId": cid,
+                        "status": "done", "ok": True, "text": "closed once"})
+                    return {"ok": True}
+
+                with mock.patch.object(daemon, "dispatch_close_to_doma", side_effect=dispatch) as send, \
+                     mock.patch.object(daemon, "BIND_TIMEOUT_SEC", 0.1):
+                    first = threading.Thread(target=lambda: outcomes.append(daemon.close_conversation(self.cid)), daemon=True)
+                    first.start()
+                    try:
+                        self.assertTrue(dispatched.wait(2))
+                        second = daemon.close_conversation(self.cid)
+                        self.assertFalse(second["ok"])
+                        self.assertEqual(second["status"], "error")
+                        self.assertEqual(send.call_count, 1)
+                    finally:
+                        release.set()
+                        first.join(timeout=2)
+                    self.assertFalse(first.is_alive())
+                    self.assertEqual(len(outcomes), 1)
+                    self.assertTrue(outcomes[0]["ok"])
+                    self.assertEqual(outcomes[0]["text"], "closed once")
+                    self.assertEqual(len(daemon._REQUESTS), 1)
+                    self.assertTrue(next(iter(daemon._REQUESTS.values()))["event"].is_set())
+
     def test_socket_receipt_survives_panel_disconnect_and_never_becomes_a_panel(self):
         panel = object()
         daemon._CLIENTS.append(panel)
