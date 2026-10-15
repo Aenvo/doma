@@ -138,6 +138,40 @@ check('matching double backtick code delimiters protect a multiline URL', () => 
   assert.match(html, /<code>fetch https:\/\/example\.com\/ ?next<\/code>/);
 });
 
+const videoSeekUrl = 'doma://video/seek?seconds=125';
+const assertVideoSeekButton = (source: string) => {
+  const html = render(source);
+  assert.match(html, /<button\b[^>]*data-doma-href="doma:\/\/video\/seek\?seconds=125"/);
+};
+
+check('an unmatched double backtick does not hide a following video seek link', () => {
+  assertVideoSeekButton(`Type ${'``'} then click ${videoSeekUrl}`);
+});
+
+check('an unmatched single backtick does not hide a following video seek link', () => {
+  assertVideoSeekButton(`Type ${'`'} then click ${videoSeekUrl}`);
+});
+
+check('a different delimiter length does not close an unmatched backtick run', () => {
+  assertVideoSeekButton(`Type ${'``'} then click ${videoSeekUrl} ${'`'}`);
+});
+
+check('an unmatched longer run does not hide a later closed shorter code span', () => {
+  const html = render(`Type ${'``'} then ${'`'}fetch ${videoSeekUrl} next${'`'}`);
+  assert.match(html, /<code>fetch doma:\/\/video\/seek\?seconds=125 next<\/code>/);
+  assert.doesNotMatch(html, /data-doma-href/);
+});
+
+check('a closed multiline code span protects a video seek URL despite a shorter inner run', () => {
+  const html = render(`${'``'}fetch ${'`'} ${videoSeekUrl}\nnext${'``'}`);
+  assert.match(html, /<code>fetch ` doma:\/\/video\/seek\?seconds=125 next<\/code>/);
+  assert.doesNotMatch(html, /data-doma-href/);
+});
+
+check('a video seek URL after a closed code span remains an actionable link', () => {
+  assertVideoSeekButton(`${'``'}fetch\nnext${'``'} then click ${videoSeekUrl}`);
+});
+
 check('an escaped backtick does not hide a following bare URL boundary', () => {
   const html = render(`\\\` ${url}\n${marker}`);
   assert.deepEqual(links(html), [{ href: url, text: url }]);
