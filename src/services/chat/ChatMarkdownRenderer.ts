@@ -144,13 +144,28 @@ function isUrlInMarkdownLinkLabel(full: string, offset: number, rawLength: numbe
 
 /** 行内 `code` 内的 URL 不应 autolink，否则会生成 `` `[url](url)` `` 导致 marked 无法解析 */
 function isInsideInlineCode(full: string, offset: number): boolean {
-  let delimiterLength = 0;
-  for (const match of full.slice(0, offset).matchAll(/(?<!\\)`+/g)) {
-    const length = match[0].length;
-    if (delimiterLength === 0) delimiterLength = length;
-    else if (delimiterLength === length) delimiterLength = 0;
+  for (let start = 0; start < offset;) {
+    // Outside code, an escape consumes exactly the next character.
+    if (full[start] === "\\") { start += 2; continue; }
+    if (full[start] !== "`") { start++; continue; }
+    let contentStart = start + 1;
+    while (full[contentStart] === "`") contentStart++;
+    const delimiterLength = contentStart - start;
+
+    let closing = -1;
+    let next = full.indexOf("`", contentStart);
+    while (next !== -1) {
+      let end = next + 1;
+      while (full[end] === "`") end++;
+      if (end - next === delimiterLength) { closing = next; break; }
+      next = full.indexOf("`", end);
+    }
+    // An unmatched run is literal text; a later, shorter run may still open code.
+    if (closing === -1) { start = contentStart; continue; }
+    if (offset >= contentStart && offset < closing) return true;
+    start = closing + delimiterLength;
   }
-  return delimiterLength !== 0;
+  return false;
 }
 
 const IMAGE_URL_PATH_RE = /\.(?:svg|png|jpe?g|gif|webp|avif|ico)(?:[?#][^)\s]*)?$/i;
