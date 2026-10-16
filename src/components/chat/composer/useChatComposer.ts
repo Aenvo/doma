@@ -2496,5 +2496,9 @@ export function useChatComposer(options: UseChatComposerOptions) {
     insertQuoteChipAtCaret,
     focus,
     openAddSkillDialogWithBody,
+    /** 供手机 sheet 弹层临时加高（避免只靠子组件 emit） */
+    slashMenuOpen,
+    atMenuOpen,
+    showAddSkillDialog,
   };
 }

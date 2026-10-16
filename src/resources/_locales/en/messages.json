@@ -1,10 +1,10 @@
 {
     "extension_name": {
-        "message": "DomA - Conversation is action, Your browser agent",
+        "message": "DomA - Conversation is action",
         "description": ""
     },
     "extension_name_browser": {
-        "message": "DomA - Conversation is action, Your browser agent",
+        "message": "DomA - Conversation is action",
         "description": ""
     },
     "extension_description": {
@@ -66,5 +66,61 @@
     "userscriptUnknownError": {
         "message": "Unknown error",
         "description": ""
+    },
+    "safari_action_opening": {
+        "message": "Opening…",
+        "description": "Safari toolbar popup: in progress"
+    },
+    "safari_action_closing": {
+        "message": "Closing…",
+        "description": "Safari toolbar popup: closing in progress"
+    },
+    "safari_action_opened": {
+        "message": "Opened",
+        "description": "Safari toolbar popup: panel opened"
+    },
+    "safari_action_closed": {
+        "message": "Closed",
+        "description": "Safari toolbar popup: panel closed"
+    },
+    "safari_action_done": {
+        "message": "Done",
+        "description": "Safari toolbar popup: generic success"
+    },
+    "safari_action_failed": {
+        "message": "Something went wrong",
+        "description": "Safari toolbar popup: generic failure"
+    },
+    "safari_action_no_background": {
+        "message": "Background unavailable",
+        "description": "Safari toolbar popup: SW / background missing"
+    },
+    "safari_action_toggle_failed": {
+        "message": "Toggle failed",
+        "description": "Unused fallback; popup shows SW/side-panel error text instead"
+    },
+    "safari_action_allow_site": {
+        "message": "Allow DomA on this site (Safari · aA · Website Settings), then tap the DomA icon again.",
+        "description": "Safari toolbar popup: site permission needed"
+    },
+    "safari_action_restricted": {
+        "message": "This page can’t host DomA. Open a normal website, then try again.",
+        "description": "Safari toolbar popup: restricted URL"
+    },
+    "safari_action_no_tab": {
+        "message": "No active webpage. Switch to a tab, then tap the DomA icon again.",
+        "description": "Safari toolbar popup: no active tab"
+    },
+    "safari_action_shell_failed": {
+        "message": "Page shell didn’t respond. Reload this page, then tap the DomA icon again.",
+        "description": "Safari toolbar popup: panel shell failed to open"
+    },
+    "safari_action_background_retry": {
+        "message": "No response from background. Tap the DomA icon again. If it keeps failing, quit Safari and reopen.",
+        "description": "Safari toolbar popup: SW asleep / no response"
+    },
+    "safari_action_retry_hint": {
+        "message": "Tap the DomA icon again to retry.",
+        "description": "Safari toolbar popup: short retry hint"
     }
 }

@@ -42,6 +42,21 @@ python_ok() {
 PYTHON_BIN=""
 PYTHON_PREFIX_ARGS=()
 
+# `set -u` + empty array: ${arr[*]} / "${arr[@]}" can throw "unbound variable" (bash 4.4+).
+python_prefix_str() {
+  if ((${#PYTHON_PREFIX_ARGS[@]} > 0)); then
+    printf '%s' "${PYTHON_PREFIX_ARGS[*]}"
+  fi
+}
+
+run_python() {
+  if ((${#PYTHON_PREFIX_ARGS[@]} > 0)); then
+    "$PYTHON_BIN" "${PYTHON_PREFIX_ARGS[@]}" "$@"
+  else
+    "$PYTHON_BIN" "$@"
+  fi
+}
+
 resolve_python() {
   PYTHON_BIN=""
   PYTHON_PREFIX_ARGS=()
@@ -135,7 +150,7 @@ install_python_linux() {
 
 ensure_python() {
   if have_python; then
-    echo "[DomA] Python OK: $PYTHON_BIN ${PYTHON_PREFIX_ARGS[*]} ($("$PYTHON_BIN" "${PYTHON_PREFIX_ARGS[@]}" -V 2>&1))"
+    echo "[DomA] Python OK: $PYTHON_BIN $(python_prefix_str) ($(run_python -V 2>&1))"
     return 0
   fi
   if is_windows; then
@@ -159,7 +174,7 @@ ensure_python() {
     echo "[DomA] ERROR: Python still missing after install." >&2
     exit 1
   fi
-  echo "[DomA] Python OK: $PYTHON_BIN ${PYTHON_PREFIX_ARGS[*]} ($("$PYTHON_BIN" "${PYTHON_PREFIX_ARGS[@]}" -V 2>&1))"
+  echo "[DomA] Python OK: $PYTHON_BIN $(python_prefix_str) ($(run_python -V 2>&1))"
 }
 
 download() {
@@ -186,7 +201,7 @@ echo "[DomA] downloading daemon…"
 download "$DAEMON_URL" "$TMP/doma_bridge_daemon.py"
 
 # basic sanity
-"$PYTHON_BIN" "${PYTHON_PREFIX_ARGS[@]}" -m py_compile "$TMP/doma_mcp_stdio.py" "$TMP/doma_bridge_daemon.py"
+run_python -m py_compile "$TMP/doma_mcp_stdio.py" "$TMP/doma_bridge_daemon.py"
 
 install -m 755 "$TMP/doma_mcp_stdio.py" "$INSTALL_DIR/doma_mcp_stdio.py"
 install -m 755 "$TMP/doma_bridge_daemon.py" "$INSTALL_DIR/doma_bridge_daemon.py"
@@ -201,8 +216,8 @@ echo "[DomA] Paste the following into your MCP client config (e.g. Cursor ~/.cur
 echo ""
 # Machine-readable block for UIs that scrape between markers
 echo "-----BEGIN DOMA_MCP_JSON-----"
-DOMA_MCP_CMD="$PY_NATIVE" DOMA_MCP_STDIO="$STDIO_NATIVE" DOMA_MCP_PREFIX="${PYTHON_PREFIX_ARGS[*]}" \
-"$PYTHON_BIN" "${PYTHON_PREFIX_ARGS[@]}" - <<'PY'
+DOMA_MCP_CMD="$PY_NATIVE" DOMA_MCP_STDIO="$STDIO_NATIVE" DOMA_MCP_PREFIX="$(python_prefix_str)" \
+run_python - <<'PY'
 import json, os
 cmd = os.environ["DOMA_MCP_CMD"]
 stdio = os.environ["DOMA_MCP_STDIO"]

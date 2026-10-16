@@ -14,6 +14,8 @@ export default {
         showComposer: "Show input",
         showConversation: "Show conversation",
         sessions: "Conversations",
+        stopTask: "Stop",
+        taskIdle: "Not running",
       },
       scheduled: {
         title: "Scheduled",
@@ -365,6 +367,7 @@ export default {
         joinDiscord: "Join our Discord",
         feedback: "Send feedback",
         feedbackMailSubject: "DomA feedback",
+        logout: "Log out",
       },
       firstChatPrompt: {
         title: "Try your first chat with DomA",
@@ -487,6 +490,8 @@ export default {
         showComposer: "显示输入框",
         showConversation: "显示对话",
         sessions: "会话",
+        stopTask: "停止",
+        taskIdle: "当前无任务",
       },
       scheduled: {
         title: "定时消息",
@@ -838,6 +843,7 @@ export default {
         joinDiscord: "加入我们的 Discord",
         feedback: "反馈问题",
         feedbackMailSubject: "DomA 问题反馈",
+        logout: "退出登录",
       },
       firstChatPrompt: {
         title: "试试与 DomA 的第一次对话",
