@@ -3,14 +3,14 @@
     class="chat-panel"
     :class="{
       'chat-panel--safari-shell': IS_SAFARI_EXT,
-      'chat-panel--phone': IS_PHONE_CHAT,
+      'chat-panel--phone': USE_PHONE_VIEW_TOGGLE,
       'chat-panel--phone-sheet-boost': IS_IPHONE_SHEET && phoneSheetOverlayBoostActive,
       'chat-panel--ipad-side': IS_IPAD_SIDE,
     }"
   >
     <header
       class="chat-header"
-      :class="{ 'chat-header--phone': IS_PHONE_CHAT }"
+      :class="{ 'chat-header--phone': USE_PHONE_VIEW_TOGGLE }"
     >
       <div class="chat-title-row">
         <div class="chat-header-lead">
@@ -90,7 +90,7 @@
           </button>
         </div>
         <button
-          v-if="IS_PHONE_CHAT"
+          v-if="USE_PHONE_VIEW_TOGGLE"
           type="button"
           class="phone-view-toggle-btn"
           :class="phoneComposerVisible ? 'phone-view-toggle-btn--composer' : 'phone-view-toggle-btn--chat'"
@@ -364,7 +364,7 @@
     </header>
     
     <div
-      v-show="!IS_PHONE_CHAT || !phoneComposerVisible"
+      v-show="!USE_PHONE_VIEW_TOGGLE || !phoneComposerVisible"
       class="chat-messages-area"
       :class="{ 'chat-messages-area--skill-drop': skillFileDropActive }"
       @dragenter.prevent="onMessagesAreaDragEnter"
@@ -748,7 +748,7 @@
       </div>
       <!-- 手机对话态：右下角停止（未跑任务时置灰） -->
       <button
-        v-if="IS_PHONE_CHAT && !phoneComposerVisible"
+        v-if="USE_PHONE_VIEW_TOGGLE && !phoneComposerVisible"
         type="button"
         class="phone-chat-stop-fab"
         :class="{ 'is-idle': !loading }"
@@ -763,7 +763,7 @@
     </div>
 
     <div
-      v-show="!IS_PHONE_CHAT || phoneComposerVisible"
+      v-show="!USE_PHONE_VIEW_TOGGLE || phoneComposerVisible"
       class="chat-input-row"
       :style="ipadInputBottomStyle"
       @focusin="onPhoneComposerFocusIn"
@@ -1138,7 +1138,7 @@ import {
   safariShellOnTurnDone,
   safariShellOnUserSend,
 } from "@/edition/safariShellChat";
-import { isPhoneChatLayout } from "@/utils/device";
+import { isIphoneUnfoldedSideLayout, isPhoneChatLayout } from "@/utils/device";
 
 /** Safari 页内壳：禁 tabs/windows；宿主 tab 由 edition(pro) + panelShell 注入 */
 const IS_SAFARI_EXT = isSafariSidePanelShell();
@@ -1146,35 +1146,48 @@ const IS_SAFARI_EXT = isSafariSidePanelShell();
 /** 手机侧栏布局（iPhone / Android 手机；开源语义，非 Safari 特例） */
 const IS_PHONE_CHAT = isPhoneChatLayout();
 
-/** Safari iPhone 底栏 sheet：仅用于向 panelShell 同步高度 */
+/**
+ * 外壳当前布局。iframe 的 src 在首次打开时写死，折叠/展开不会改 URL；
+ * 面板自身宽度也不是整页宽度，不能靠 iframe 视口判断。以 panelShell 推送为准。
+ */
+let liveShellLayout = "";
+
+function urlShellLayout(): string {
+  try {
+    return new URLSearchParams(location.search).get("shellLayout") || "";
+  } catch {
+    return "";
+  }
+}
+
+function effectiveShellLayout(): string {
+  return liveShellLayout || urlShellLayout();
+}
+
+/** Safari iPhone 底栏 sheet：仅用于向 panelShell 同步高度；Duo 展开时改为侧栏 */
 function detectIphoneSheetShell(): boolean {
   if (!IS_SAFARI_EXT) return false;
-  try {
-    const layout = new URLSearchParams(location.search).get("shellLayout");
-    if (layout === "iphone-sheet") return true;
-    if (layout === "side" || layout === "ipad-side") return false;
-  } catch {
-    // ignore
-  }
+  const layout = effectiveShellLayout();
+  if (layout === "iphone-sheet") return true;
+  if (layout === "side" || layout === "ipad-side") return false;
+  if (isIphoneUnfoldedSideLayout()) return false;
   const ua = navigator.userAgent || "";
   return /iPhone|iPod/i.test(ua);
 }
-const IS_IPHONE_SHEET = detectIphoneSheetShell();
+/** 折叠↔展开会变；模板与脚本都读 .value / 自动解包 */
+const IS_IPHONE_SHEET = ref(detectIphoneSheetShell());
 
 /**
  * Safari iPad 侧栏：输入区底距用 safe-area 动态垫高（只改 iframe 内，不动 host margin）。
  * Mac 侧栏不挂。扩展 iframe 里 UA / maxTouchPoints 常不准，多信号兜底。
+ * iPhone Duo 展开视口也走侧栏 safe-bottom。
  */
 function detectIpadSideShell(): boolean {
-  if (!IS_SAFARI_EXT || IS_IPHONE_SHEET) return false;
-  let layout = "";
-  try {
-    layout = new URLSearchParams(location.search).get("shellLayout") || "";
-  } catch {
-    layout = "";
-  }
+  if (!IS_SAFARI_EXT || detectIphoneSheetShell()) return false;
+  const layout = effectiveShellLayout();
   if (layout === "iphone-sheet") return false;
   if (layout === "ipad-side") return true;
+  if (isIphoneUnfoldedSideLayout()) return true;
 
   const ua = navigator.userAgent || "";
   if (/iPad/i.test(ua)) return true;
@@ -1190,9 +1203,17 @@ function detectIpadSideShell(): boolean {
   }
   return false;
 }
-const IS_IPAD_SIDE = detectIpadSideShell();
-if (IS_IPAD_SIDE) {
+const IS_IPAD_SIDE = ref(detectIpadSideShell());
+if (IS_IPAD_SIDE.value) {
   console.log("[ChatPanel] ipad-side input safe-bottom enabled");
+}
+
+function refreshSafariShellLayoutFlags() {
+  if (!IS_SAFARI_EXT) return;
+  const nextSheet = detectIphoneSheetShell();
+  const nextIpad = detectIpadSideShell();
+  if (nextSheet !== IS_IPHONE_SHEET.value) IS_IPHONE_SHEET.value = nextSheet;
+  if (nextIpad !== IS_IPAD_SIDE.value) IS_IPAD_SIDE.value = nextIpad;
 }
 
 /**
@@ -1201,9 +1222,9 @@ if (IS_IPAD_SIDE) {
  */
 const IPAD_INPUT_BASE_PAD_PX = 10;
 const IPAD_SAFE_BOTTOM_FALLBACK_PX = 34;
-const ipadSafeBottomPx = ref(IS_IPAD_SIDE ? IPAD_SAFE_BOTTOM_FALLBACK_PX : 0);
+const ipadSafeBottomPx = ref(IS_IPAD_SIDE.value ? IPAD_SAFE_BOTTOM_FALLBACK_PX : 0);
 const ipadInputBottomStyle = computed(() => {
-  if (!IS_IPAD_SIDE) return undefined;
+  if (!IS_IPAD_SIDE.value) return undefined;
   const extra = Math.max(0, ipadSafeBottomPx.value);
   return {
     paddingBottom: `${IPAD_INPUT_BASE_PAD_PX + extra}px`,
@@ -1211,13 +1232,13 @@ const ipadInputBottomStyle = computed(() => {
 });
 
 function applyIpadSafeBottomPx(px: number) {
-  if (!IS_IPAD_SIDE) return;
+  if (!IS_IPAD_SIDE.value) return;
   const n = Math.max(0, Math.round(Number(px) || 0));
   ipadSafeBottomPx.value = n > 0 ? n : IPAD_SAFE_BOTTOM_FALLBACK_PX;
 }
 
 function onIpadSafeAreaBottomMessage(ev: MessageEvent) {
-  if (!IS_IPAD_SIDE) return;
+  if (!IS_IPAD_SIDE.value) return;
   const data = ev?.data;
   if (!data || data.source !== "doma-panel-shell") return;
   if (data.operate !== "safariPanel/safeAreaBottom") return;
@@ -1225,8 +1246,28 @@ function onIpadSafeAreaBottomMessage(ev: MessageEvent) {
   applyIpadSafeBottomPx(bottom);
 }
 
+/** panelShell 在 Duo 折叠/展开后主动推 layout；URL 不会变，必须以这条消息为准 */
+function onSafariShellLayoutMessage(ev: MessageEvent) {
+  if (!IS_SAFARI_EXT) return;
+  const data = ev?.data;
+  if (!data || data.source !== "doma-panel-shell") return;
+  if (data.operate !== "safariPanel/shellLayout") return;
+  const layout = typeof data.shellLayout === "string" ? data.shellLayout : "";
+  if (layout === "iphone-sheet" || layout === "ipad-side" || layout === "side") {
+    liveShellLayout = layout;
+  }
+  const wasSheet = IS_IPHONE_SHEET.value;
+  refreshSafariShellLayoutFlags();
+  if (wasSheet === IS_IPHONE_SHEET.value) return;
+  if (IS_IPHONE_SHEET.value) {
+    phoneComposerVisible.value = true;
+    syncPhoneSheetHeight();
+  }
+  if (IS_IPAD_SIDE.value) syncIpadInputSafeBottom();
+}
+
 function syncIpadInputSafeBottom() {
-  if (!IS_IPAD_SIDE) return;
+  if (!IS_IPAD_SIDE.value) return;
   try {
     window.parent?.postMessage(
       { source: "doma-sidepanel", operate: "safariPanel/querySafeAreaBottom" },
@@ -1239,6 +1280,14 @@ function syncIpadInputSafeBottom() {
 
 /** 手机：true=输入框视图；false=对话内容视图 */
 const phoneComposerVisible = ref(true);
+
+/**
+ * 仅底部 sheet（折叠 iPhone）才「对话↔输入」互斥切换。
+ * Safari 侧栏（含 Duo 展开）与桌面一致：对话和输入同屏。
+ */
+const USE_PHONE_VIEW_TOGGLE = computed(
+  () => IS_PHONE_CHAT && (!IS_SAFARI_EXT || IS_IPHONE_SHEET.value),
+);
 
 type ConversationPickerExpose = {
   expand: () => void;
@@ -1306,7 +1355,7 @@ function postSheetHeightToShell(payload: {
   persist?: boolean;
   coverOnly?: boolean;
 }) {
-  if (!IS_IPHONE_SHEET) return;
+  if (!IS_IPHONE_SHEET.value) return;
   try {
     const msg: Record<string, unknown> = {
       source: "doma-sidepanel",
@@ -1421,7 +1470,7 @@ function phoneOverlayBoostPayload(
 
 /** Safari 手机 sheet：紧凑高，或对话手动滑高后的半屏；弹层打开时临时抬高 */
 function syncPhoneSheetHeight() {
-  if (!IS_IPHONE_SHEET) return;
+  if (!IS_IPHONE_SHEET.value) return;
   const boost = resolvePhoneOverlayBoostKind();
 
   // `/` / 模式菜单 / header / ActionModal 等：只盖 host，绝不改网页分栏
@@ -1490,45 +1539,45 @@ function onComposerOverlayBoostChange(payload: {
   active: boolean;
   kind: PhoneSheetOverlayBoostKind;
 }) {
-  if (!IS_IPHONE_SHEET) return;
+  if (!IS_IPHONE_SHEET.value) return;
   phoneOverlayBoostFromComposerUi.value = payload.active ? payload.kind : false;
   syncPhoneSheetHeight();
 }
 
 function onConversationPickerExpandedChange(expanded: boolean) {
-  if (!IS_IPHONE_SHEET) return;
+  if (!IS_IPHONE_SHEET.value) return;
   phoneOverlayBoostFromPicker.value = expanded;
   syncPhoneSheetHeight();
 }
 
 /** 仅上滑升高半屏；自动 scrollTop / 下滑 / 半屏后手势都不改高度 */
 function expandPhoneSheetForChatScroll() {
-  if (!IS_PHONE_CHAT || phoneComposerVisible.value) return;
+  if (!USE_PHONE_VIEW_TOGGLE.value || phoneComposerVisible.value) return;
   if (phoneSheetChatExpanded) return;
   phoneSheetChatExpanded = true;
-  if (IS_IPHONE_SHEET) {
+  if (IS_IPHONE_SHEET.value) {
     postSheetHeightToShell({ ratio: PHONE_SHEET_CHAT_RATIO, persist: false });
   }
 }
 
 function onPhoneMessagesTouchStart(ev: TouchEvent) {
-  if (!IS_PHONE_CHAT || phoneComposerVisible.value) return;
+  if (!USE_PHONE_VIEW_TOGGLE.value || phoneComposerVisible.value) return;
   // 已半屏：不再跟踪手势，把滚动留给浏览器
   if (phoneSheetChatExpanded) return;
   phoneMessagesTouchStartY = ev.touches[0]?.clientY ?? 0;
 }
 
 function onPhoneMessagesTouchMove(ev: TouchEvent) {
-  if (!IS_PHONE_CHAT || phoneComposerVisible.value) return;
+  if (!USE_PHONE_VIEW_TOGGLE.value || phoneComposerVisible.value) return;
   if (phoneSheetChatExpanded) return;
   const y = ev.touches[0]?.clientY ?? 0;
   const dy = y - phoneMessagesTouchStartY; // <0 手指上移
   if (dy < -14) expandPhoneSheetForChatScroll();
 }
 
-/** 手机模式：通知宿主页（Safari sheet 等）盖/撤上半页点击挡板 */
+/** 底部 sheet：通知宿主页盖/撤上半页点击挡板（侧栏不同屏切换，不发） */
 function postPhoneComposerActiveToShell(active: boolean) {
-  if (!IS_PHONE_CHAT) return;
+  if (!USE_PHONE_VIEW_TOGGLE.value) return;
   try {
     window.parent?.postMessage(
       {
@@ -1554,12 +1603,12 @@ function blurPhoneComposerInput() {
 }
 
 function onPhoneComposerFocusIn() {
-  if (!IS_PHONE_CHAT || !phoneComposerVisible.value) return;
+  if (!USE_PHONE_VIEW_TOGGLE.value || !phoneComposerVisible.value) return;
   postPhoneComposerActiveToShell(true);
 }
 
 function onPhoneComposerFocusOut(ev: FocusEvent) {
-  if (!IS_PHONE_CHAT) return;
+  if (!USE_PHONE_VIEW_TOGGLE.value) return;
   const row = ev.currentTarget as HTMLElement | null;
   const next = ev.relatedTarget as Node | null;
   if (row && next && row.contains(next)) return;
@@ -1570,7 +1619,7 @@ function onPhoneComposerFocusOut(ev: FocusEvent) {
 }
 
 function onPhoneShellBlurComposerMessage(ev: MessageEvent) {
-  if (!IS_PHONE_CHAT) return;
+  if (!USE_PHONE_VIEW_TOGGLE.value) return;
   const data = ev?.data;
   if (!data || data.source !== "doma-panel-shell") return;
   if (data.operate !== "safariPanel/blurComposer") return;
@@ -1579,7 +1628,7 @@ function onPhoneShellBlurComposerMessage(ev: MessageEvent) {
 
 
 function setPhoneComposerVisible(visible: boolean) {
-  if (!IS_PHONE_CHAT) return;
+  if (!USE_PHONE_VIEW_TOGGLE.value) return;
   // 切到对话前先量输入高度，否则下一帧 input 已隐藏
   if (!visible && phoneComposerVisible.value) {
     measurePhoneCompactSheetHeightPx();
@@ -2829,15 +2878,15 @@ function openActionModal(opts: OpenActionModalOptions) {
 
 setChatActionModalOpener(openActionModal);
 
-/** 手机：弹框统一切回输入态（ActionModal 挂在输入区），再按弹框高度矮加高 */
+/** 底部 sheet：弹框统一切回输入态（ActionModal 挂在输入区），再按弹框高度矮加高 */
 function ensurePhoneComposerForOverlayModal() {
-  if (!IS_PHONE_CHAT) return;
+  if (!USE_PHONE_VIEW_TOGGLE.value) return;
   setPhoneComposerVisible(true);
 }
 
 /** 关掉 ActionModal 后强制收回 sheet（不依赖 coverBoost 标志是否已被其它 sync 打乱） */
 function forcePhoneSheetRestoreAfterActionModal() {
-  if (!IS_IPHONE_SHEET) return;
+  if (!IS_IPHONE_SHEET.value) return;
   phoneOverlayBoostFromActionModal.value = false;
   // 若还有其它弹层在加高，走统一 sync，勿强行压矮
   if (resolvePhoneOverlayBoostKind()) {
@@ -2874,7 +2923,7 @@ watch(showActionModal, (open) => {
     return;
   }
   ensurePhoneComposerForOverlayModal();
-  if (IS_IPHONE_SHEET) {
+  if (IS_IPHONE_SHEET.value) {
     // 先等切回输入态布局，再记 before + 按弹框高度加高，避免记成对话半屏高
     void nextTick(() => {
       if (!showActionModal.value) return;
@@ -4768,7 +4817,7 @@ watch(
     inlineComposer.showAddSkillDialog,
   ],
   ([dockSlash, dockAt, dockSkill, inlineSlash, inlineAt, inlineSkill]) => {
-    if (!IS_IPHONE_SHEET) return;
+    if (!IS_IPHONE_SHEET.value) return;
     if (dockSkill || inlineSkill) {
       phoneOverlayBoostFromSlash.value = "dialog";
     } else if (dockSlash || dockAt || inlineSlash || inlineAt) {
@@ -5103,23 +5152,49 @@ async function abortTask() {
 
 onMounted(async () => {
   console.log("[ChatPanel] mount-2 begin", { safari: IS_SAFARI_EXT, phone: IS_PHONE_CHAT });
-  if (IS_PHONE_CHAT) {
+  if (USE_PHONE_VIEW_TOGGLE.value) {
     // 默认输入视图；Safari sheet 高度贴合 header+composer
     phoneComposerVisible.value = true;
     syncPhoneSheetHeight();
     window.setTimeout(() => syncPhoneSheetHeight(), 120);
     window.setTimeout(() => syncPhoneSheetHeight(), 400);
-  }
-  if (IS_PHONE_CHAT) {
     window.addEventListener("message", onPhoneShellBlurComposerMessage);
   }
-  if (IS_IPAD_SIDE) {
-    window.addEventListener("message", onIpadSafeAreaBottomMessage);
-    syncIpadInputSafeBottom();
-    window.setTimeout(() => syncIpadInputSafeBottom(), 120);
-    window.setTimeout(() => syncIpadInputSafeBottom(), 400);
-  }
   if (IS_SAFARI_EXT) {
+    // Duo 折叠/展开会切换 sheet↔侧栏；始终监听，标志位变了再 sync
+    window.addEventListener("message", onIpadSafeAreaBottomMessage);
+    window.addEventListener("message", onSafariShellLayoutMessage);
+    const queryShellLayout = () => {
+      try {
+        window.parent?.postMessage(
+          { source: "doma-sidepanel", operate: "safariPanel/queryShellLayout" },
+          "*",
+        );
+      } catch {
+        // ignore
+      }
+    };
+    queryShellLayout();
+    window.setTimeout(queryShellLayout, 200);
+    refreshSafariShellLayoutFlags();
+    if (IS_IPAD_SIDE.value) {
+      syncIpadInputSafeBottom();
+      window.setTimeout(() => syncIpadInputSafeBottom(), 120);
+      window.setTimeout(() => syncIpadInputSafeBottom(), 400);
+    }
+    let shellLayoutResizeTimer = 0;
+    const onSafariViewportMaybeFold = () => {
+      window.clearTimeout(shellLayoutResizeTimer);
+      shellLayoutResizeTimer = window.setTimeout(() => {
+        const wasSheet = IS_IPHONE_SHEET.value;
+        refreshSafariShellLayoutFlags();
+        if (wasSheet === IS_IPHONE_SHEET.value) return;
+        if (IS_IPHONE_SHEET.value) syncPhoneSheetHeight();
+        if (IS_IPAD_SIDE.value) syncIpadInputSafeBottom();
+      }, 120);
+    };
+    window.addEventListener("resize", onSafariViewportMaybeFold, { passive: true });
+    window.addEventListener("orientationchange", onSafariViewportMaybeFold);
     console.warn("[PANEL-RELOAD][iframe] ChatPanel mount-2", {
       href: String(location.href || "").slice(0, 160),
       t: Date.now(),
@@ -5968,7 +6043,7 @@ onUnmounted(() => {
     }
     postPhoneComposerActiveToShell(false);
   }
-  if (IS_IPAD_SIDE) {
+  if (IS_IPAD_SIDE.value) {
     try {
       window.removeEventListener("message", onIpadSafeAreaBottomMessage);
     } catch {
@@ -6321,7 +6396,7 @@ async function loadConversation(convId: string | undefined, reason = "unknown") 
 
 async function startNewConversation() {
   if (!conversationId.value) return;
-  if (IS_PHONE_CHAT) {
+  if (USE_PHONE_VIEW_TOGGLE.value) {
     setPhoneComposerVisible(true);
   }
   messages.value = [];
@@ -6746,7 +6821,7 @@ watch(
   [showCreateExtensionDescDialog, showProviderSetup],
   ([a, b]) => {
     if (a || b) ensurePhoneComposerForOverlayModal();
-    if (!IS_IPHONE_SHEET) return;
+    if (!IS_IPHONE_SHEET.value) return;
     phoneOverlayBoostFromPanelDialog.value = !!(a || b);
     syncPhoneSheetHeight();
   },
@@ -6759,7 +6834,7 @@ watch(
 watch(
   [showHistory, showDbPlus, showScheduled, showMcp, showDownloader, showAccountPanel],
   ([history, dbPlus, scheduled, mcp, downloader, account]) => {
-    if (!IS_IPHONE_SHEET) return;
+    if (!IS_IPHONE_SHEET.value) return;
     phoneOverlayBoostFromHeaderPanel.value = !!(
       history ||
       dbPlus ||
@@ -7512,8 +7587,8 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
 
   setConversationLoading(persistConvId, true);
 
-  // 手机布局：发送开任务后切到对话视图，腾出输入区高度
-  if (IS_PHONE_CHAT && !opts?.summarizeTurn) {
+  // 底部 sheet：发送开任务后切到对话视图；侧栏同屏不切
+  if (USE_PHONE_VIEW_TOGGLE.value && !opts?.summarizeTurn) {
     setPhoneComposerVisible(false);
   }
 
