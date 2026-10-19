@@ -237,3 +237,5 @@ print(json.dumps({
 PY
 echo "-----END DOMA_MCP_JSON-----"
 echo ""
+echo "[DomA] The MCP client starts/replaces the local daemon automatically — no manual start/stop."
+echo ""

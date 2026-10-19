@@ -117,6 +117,44 @@ class BridgeAccessTests(unittest.TestCase):
             )
         self.assertIs(result["authRequired"], True)
 
+    def test_shutdown_requires_auth_and_sets_stop_flag(self) -> None:
+        daemon._STOP.clear()
+        connection = http.client.HTTPConnection("127.0.0.1", daemon.CONTROL_PORT, timeout=2)
+        try:
+            connection.request(
+                "POST",
+                "/v1/shutdown",
+                body=b"{}",
+                headers={"Content-Type": "application/json", "Content-Length": "2"},
+            )
+            response = connection.getresponse()
+            self.assertEqual(response.status, 401)
+            response.read()
+        finally:
+            connection.close()
+        self.assertFalse(daemon._STOP.is_set())
+
+        connection = http.client.HTTPConnection("127.0.0.1", daemon.CONTROL_PORT, timeout=2)
+        try:
+            connection.request(
+                "POST",
+                "/v1/shutdown",
+                body=b"{}",
+                headers={
+                    "Authorization": f"Bearer {self.token}",
+                    "Content-Type": "application/json",
+                    "Content-Length": "2",
+                },
+            )
+            response = connection.getresponse()
+            body = json.loads(response.read())
+            self.assertEqual(response.status, 200)
+            self.assertTrue(body["ok"])
+        finally:
+            connection.close()
+        self.assertTrue(daemon._STOP.is_set())
+        daemon._STOP.clear()
+
 
 class BridgeProtocolTests(unittest.TestCase):
     def test_websocket_handshake_rejects_pages_and_accepts_extension(self) -> None:
@@ -176,14 +214,45 @@ class BridgeProtocolTests(unittest.TestCase):
         finally:
             stdio.call_get = original
 
-    def test_old_daemon_is_rejected_before_a_new_spawn(self) -> None:
-        original = stdio._health_status
+    def test_old_daemon_is_stopped_then_respawned(self) -> None:
+        health_calls = {"n": 0}
+        stop_calls = {"n": 0}
+        spawn_calls = {"n": 0}
+
+        def health() -> dict | None:
+            health_calls["n"] += 1
+            if health_calls["n"] == 1:
+                return {"ok": True, "role": "doma-bridge-daemon"}  # outdated: no authRequired
+            if health_calls["n"] == 2:
+                return None  # after stop
+            return {"ok": True, "role": "doma-bridge-daemon", "authRequired": True}
+
+        original_health = stdio._health_status
+        original_stop = stdio._stop_daemon
+        original_spawn = stdio._spawn_daemon
+        try:
+            stdio._health_status = health
+            stdio._stop_daemon = lambda: stop_calls.__setitem__("n", stop_calls["n"] + 1)
+            stdio._spawn_daemon = lambda: spawn_calls.__setitem__("n", spawn_calls["n"] + 1)
+            stdio.ensure_daemon()
+            self.assertEqual(stop_calls["n"], 1)
+            self.assertEqual(spawn_calls["n"], 1)
+        finally:
+            stdio._health_status = original_health
+            stdio._stop_daemon = original_stop
+            stdio._spawn_daemon = original_spawn
+
+    def test_old_daemon_raises_if_stop_fails(self) -> None:
+        original_health = stdio._health_status
+        original_stop = stdio._stop_daemon
         try:
             stdio._health_status = lambda: {"ok": True, "role": "doma-bridge-daemon"}
-            with self.assertRaisesRegex(RuntimeError, "outdated"):
+            stdio._stop_daemon = lambda: None
+            with self.assertRaisesRegex(RuntimeError, "could not be stopped"):
                 stdio.ensure_daemon()
         finally:
-            stdio._health_status = original
+            stdio._health_status = original_health
+            stdio._stop_daemon = original_stop
 
 
 if __name__ == "__main__":

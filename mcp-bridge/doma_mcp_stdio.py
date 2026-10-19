@@ -268,6 +268,19 @@ def _health_ok() -> bool:
     return bool(out and out.get("authRequired") is True)
 
 
+def _stop_daemon() -> None:
+    """Replace/stop the singleton via daemon helpers (no user-facing stop CLI)."""
+    try:
+        # Same install dir as this stdio script → import works when MCP launches us.
+        import doma_bridge_daemon as daemon
+
+        code = daemon.stop_daemon()
+        if code != 0:
+            print(f"[mcp-stdio] stop daemon returned {code}", file=sys.stderr)
+    except Exception as e:
+        print(f"[mcp-stdio] stop daemon failed: {e}", file=sys.stderr)
+
+
 def _spawn_daemon() -> None:
     if not os.path.isfile(DAEMON_SCRIPT):
         raise FileNotFoundError(f"daemon script not found: {DAEMON_SCRIPT}")
@@ -298,9 +311,20 @@ def _spawn_daemon() -> None:
 
 
 def ensure_daemon() -> None:
+    """MCP clients own daemon lifecycle: auto-start, and replace outdated instances."""
     status = _health_status()
     if status and status.get("authRequired") is not True:
-        raise RuntimeError("DomA bridge daemon is outdated; stop it and start the updated daemon")
+        print(
+            "[mcp-stdio] outdated daemon on control port; stopping so a new one can start…",
+            file=sys.stderr,
+        )
+        _stop_daemon()
+        status = _health_status()
+        if status and status.get("authRequired") is not True:
+            raise RuntimeError(
+                "DomA bridge daemon is outdated and could not be stopped automatically "
+                f"(control {CONTROL_BASE})"
+            )
     if status:
         return
     print("[mcp-stdio] daemon not up; starting…", file=sys.stderr)
@@ -312,7 +336,13 @@ def ensure_daemon() -> None:
     while time.time() < deadline:
         status = _health_status()
         if status and status.get("authRequired") is not True:
-            raise RuntimeError("DomA bridge daemon is outdated; stop it and start the updated daemon")
+            print(
+                "[mcp-stdio] control port still serves an outdated daemon; retrying stop…",
+                file=sys.stderr,
+            )
+            _stop_daemon()
+            time.sleep(0.2)
+            continue
         if status:
             print("[mcp-stdio] daemon ready", file=sys.stderr)
             return
