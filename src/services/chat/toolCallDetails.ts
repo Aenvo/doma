@@ -68,28 +68,28 @@ export function previewToolCallValue(input: unknown, maxChars = 12_000): ToolCal
   return { value: visit(input, 0), ...(truncated ? { truncated: true } : {}) };
 }
 
-export function startToolCallRecord(call: ToolCallLike): ChatMessageToolCall {
+export function startToolCallRecord(call: ToolCallLike, captureDetails = false): ChatMessageToolCall {
+  const basic: ChatMessageToolCall = { id: call.id, name: call.function.name, state: 'doing' };
+  if (captureDetails !== true) return basic;
   let input = call.function.arguments ?? {};
   if (typeof input === 'string') {
     try { input = JSON.parse(input); } catch { /* Retain malformed arguments for diagnosis. */ }
   }
   return {
-    id: call.id,
-    name: call.function.name,
-    state: 'doing',
+    ...basic,
     details: { status: 'running', startedAt: Date.now(), input: previewToolCallValue(input, 6_000) },
   };
 }
 
-export function finishToolCallRecord(call: ToolCallLike, result: unknown): ChatMessageToolCall {
+export function finishToolCallRecord(call: ToolCallLike, result: unknown, captureDetails = false): ChatMessageToolCall {
+  const basic: ChatMessageToolCall = { id: call.id, name: call.function.name, state: 'doing' };
+  if (captureDetails !== true) return basic;
   const record = result && typeof result === 'object' && !Array.isArray(result)
     ? result as Record<string, unknown> : undefined;
   const failed = record?.ok === false || record?.success === false || record?.error != null;
   const error = failed ? record?.error ?? record?.message : undefined;
   return {
-    id: call.id,
-    name: call.function.name,
-    state: 'doing',
+    ...basic,
     details: {
       status: failed ? 'error' : 'completed',
       finishedAt: Date.now(),

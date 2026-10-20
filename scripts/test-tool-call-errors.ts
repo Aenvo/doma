@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 import { resolve } from 'node:path';
+import { finishToolCallRecord, mergeToolCallRecord, startToolCallRecord } from '../src/services/chat/toolCallDetails.ts';
 
 const mocks: Record<string, string> = {
   contextManager: `export const CONTEXT_LIMITS={MAX_MESSAGES:40,TOKEN_WARNING:100000};
@@ -53,9 +54,10 @@ function queue(...bodies: string[]) {
   globalThis.fetch = async () => { requests++; assert.ok(bodies.length, 'unexpected model request'); return new Response(bodies.shift()!); };
   return () => requests;
 }
-function make(kind: Kind, runTool: (controller: AbortController) => Promise<unknown>, callbackFails = false) {
+function make(kind: Kind, runTool: (controller: AbortController) => Promise<unknown>, callbackFails = false, captureDetails = false) {
   const Base = kind === 'openai' ? services.LlmService : services.AnthropicClaudeService;
   const processed: any[][] = [], calls: any[] = [], results: any[] = [], errors: Error[] = [], events: string[] = [];
+  const history = new Map<string, ReturnType<typeof startToolCallRecord>>();
   const controller = new AbortController();
   class FixtureService extends Base {
     async fetchOptions() { return {}; }
@@ -66,9 +68,12 @@ function make(kind: Kind, runTool: (controller: AbortController) => Promise<unkn
   const callbacks = {
     onConversationStart() {}, onConversationDone() { events.push('conversation-done'); },
     onMessageStart() {}, onMessageDone() { events.push('message-done'); }, onTextMessage() {},
-    onToolCallStart() { events.push('tool-start'); },
-    async onToolCallOverride(_id: string, _msg: string, _tool: any, result: unknown) {
+    onToolCallStart(_id: string, _msg: string, tool: any) {
+      events.push('tool-start'); history.set(tool.id, startToolCallRecord(tool, captureDetails));
+    },
+    async onToolCallOverride(_id: string, _msg: string, tool: any, result: unknown) {
       events.push('tool-result'); results.push(result);
+      history.set(tool.id, mergeToolCallRecord(history.get(tool.id), finishToolCallRecord(tool, result, captureDetails)));
       if (callbackFails) throw new Error('fixture callback failure');
       return undefined;
     },
@@ -76,12 +81,32 @@ function make(kind: Kind, runTool: (controller: AbortController) => Promise<unkn
     async onMessageError(_id: string, _msg: string, error: Error) { errors.push(error); events.push('error'); },
   };
   const run = () => service.sendMessage('fixture-conversation', '', '', '', '', 'Read the page', callbacks, controller.signal);
-  return { run, controller, processed, calls, results, errors, events, callbacks };
+  return { run, controller, processed, calls, results, errors, events, callbacks, history };
 }
 async function check(name: string, run: () => Promise<void>) { await run(); checks++; savedLog(`PASS ${name}`); }
 try {
   console.log = console.warn = console.error = () => {};
   for (const kind of ['openai', 'claude'] as const) {
+    for (const captureDetails of [false, true]) {
+      await check(`${kind}: capture ${captureDetails ? 'enabled' : 'disabled'} preserves the original tool failure`, async () => {
+        const original = new Error('Fixture tool failure');
+        const fixture = make(kind, async () => { throw original; }, false, captureDetails);
+        queue(tools(kind, '{"fixture":true}'));
+        await fixture.run();
+        assert.equal(fixture.errors[0], original);
+        assert.equal(fixture.results[0].error, original.message);
+        assert.deepEqual(fixture.events, ['tool-start', 'tool-result', 'tool-done', 'error', 'conversation-done']);
+        const saved = fixture.history.get('call-1')!;
+        assert.ok(saved);
+        if (captureDetails) {
+          assert.equal(saved.details?.status, 'error');
+          assert.equal(saved.details?.error?.value, original.message);
+          assert.equal((saved.details?.input?.value as any).fixture, true);
+        } else {
+          assert.deepEqual(saved, { id: 'call-1', name: 'browser_get_current_tab', state: 'doing' });
+        }
+      });
+    }
     await check(`${kind}: success keeps the actual call arguments, timeout and result`, async () => {
       const value = { ok: true, title: 'fixture' };
       const fixture = make(kind, async () => ({ content: [{ type: 'text', text: `__JSON__${JSON.stringify(value)}` }] }));
