@@ -6,6 +6,7 @@ import { resolve } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { transform } from 'esbuild';
+import { finishToolCallRecord, mergeToolCallRecord, startToolCallRecord } from '../src/services/chat/toolCallDetails.ts';
 
 const mocks: Record<string, string> = {
   contextManager: `export const CONTEXT_LIMITS={MAX_MESSAGES:40,TOKEN_WARNING:100000};
@@ -22,7 +23,7 @@ const mocks: Record<string, string> = {
     export function markTextOnlyToolRecoveryUsed(id){recovered.add(id)}
     export async function shouldForceToolRecovery(input){globalThis.__recoveryChecks++;return !!globalThis.__forceRecovery&&!recovered.has(input.conversationId)}
     export const buildToolRecoveryNudgeMessage=()=>'';`,
-  browserToolRuntimeClient: `export async function callBrowserToolViaRuntime(){globalThis.__toolCalls++;return {ok:true,title:'fixture'}}`,
+  browserToolRuntimeClient: `export async function callBrowserToolViaRuntime(){globalThis.__toolCalls++;if(globalThis.__toolError)throw globalThis.__toolError;return {ok:true,title:'fixture'}}`,
   slashSkills: `export async function buildBrowserAssistantSystemPromptParts(){return {systemContent:'',basePrompt:'',skillSection:''}}`,
 };
 const bundled = await build({
@@ -61,7 +62,7 @@ function gated(kind: Kind, first: string) {
   const body = new ReadableStream<Uint8Array>({ start(c) { controller = c; c.enqueue(encoder.encode(initial)); } });
   return { response: new Response(body), finish(tail: string) { controller.enqueue(encoder.encode(tail)); controller.close(); } };
 }
-function make(kind: Kind) {
+function make(kind: Kind, captureDetails = false) {
   (globalThis as any).__recoveryChecks = 0;
   (globalThis as any).__toolCalls = 0;
   const Base = kind === 'openai' ? services.LlmService : services.AnthropicClaudeService;
@@ -69,15 +70,25 @@ function make(kind: Kind) {
   const service = new FixtureService('', 'fixture', { getLlmTools: async () => [] });
   const text: string[] = [], errors: Error[] = [], history: any[] = [];
   const fullBodies: string[] = [];
+  const toolRecords = new Map<string, ReturnType<typeof startToolCallRecord>>();
+  const toolEvents: string[] = [], toolResults: any[] = [];
   const controller = new AbortController();
   let conversationDone = 0, messageDone = 0;
   const callbacks = { onConversationStart() {}, onConversationDone() { conversationDone++; }, onMessageStart() {}, onMessageDone() { messageDone++; }, onTextMessage(_c: string, _m: string, chunk: string) { text.push(chunk); },
     onMessageError(_c: string, _m: string, error: Error) { errors.push(error); },
-    onToolCallStart() {}, onToolCallOverride: async () => undefined, onToolCallDone() {} };
+    onToolCallStart(_c: string, _m: string, tool: any) {
+      toolEvents.push('start'); toolRecords.set(tool.id, startToolCallRecord(tool, captureDetails));
+    },
+    onToolCallOverride: async (_c: string, _m: string, tool: any, result: unknown) => {
+      toolEvents.push('result'); toolResults.push(result);
+      toolRecords.set(tool.id, mergeToolCallRecord(toolRecords.get(tool.id), finishToolCallRecord(tool, result, captureDetails)));
+      return undefined;
+    },
+    onToolCallDone() { toolEvents.push('done'); } };
   (callbacks as any).onTextMessageComplete = async (_c: string, _m: string, body: string) => { fullBodies.push(body); };
   const run = (disabled = false) => service.call('fixture-conversation', '', '', '', '', history, callbacks, [], controller.signal, undefined, 0, disabled ? { disableTools: true } : {});
   const send = () => service.sendMessage('fixture-conversation', '', '', '', '', 'Read the current page', callbacks, controller.signal);
-  return { service, text, fullBodies, callbacks, errors, history, controller, run, send, get conversationDone() { return conversationDone; }, get messageDone() { return messageDone; } };
+  return { service, text, fullBodies, callbacks, errors, history, toolRecords, toolEvents, toolResults, controller, run, send, get conversationDone() { return conversationDone; }, get messageDone() { return messageDone; } };
 }
 function queue(...responses: Response[]) {
   let requests = 0;
@@ -88,6 +99,35 @@ async function check(name: string, run: () => Promise<void>) { await run(); chec
 try {
   console.log = console.warn = console.error = () => {};
   for (const kind of ['openai', 'claude'] as const) {
+    for (const captureDetails of [false, true]) {
+      await check(`${kind}: tool failure still reaches the model with capture ${captureDetails ? 'enabled' : 'disabled'}`, async () => {
+        const toolFrame = kind === 'openai'
+          ? 'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"browser_get_current_tab","arguments":"{\\"fixture\\":true}"}}]},"finish_reason":"tool_calls"}]}\n\ndata: [DONE]\n\n'
+          : 'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call-1","name":"browser_get_current_tab"}}\n\nevent: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"fixture\\":true}"}}\n\nevent: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n';
+        const fixture = make(kind, captureDetails);
+        const requests = queue(response(toolFrame), response(frames(kind, 'The tool failed.')));
+        (globalThis as any).__toolError = new Error('Fixture tool failure');
+        try {
+          assert.equal(await fixture.run(), 'done');
+          assert.equal(requests(), 2);
+          assert.equal((globalThis as any).__toolCalls, 1);
+          assert.equal(fixture.errors.length, 0);
+          assert.deepEqual(fixture.toolEvents, ['start', 'result', 'done']);
+          assert.equal(fixture.toolResults[0].ok, false);
+          assert.equal(fixture.toolResults[0].error, 'Fixture tool failure');
+          assert.deepEqual(fixture.text, ['The tool failed.']);
+          const saved = fixture.toolRecords.get('call-1')!;
+          assert.ok(saved);
+          if (captureDetails) {
+            assert.equal(saved.details?.status, 'error');
+            assert.equal(saved.details?.error?.value, 'Fixture tool failure');
+            assert.equal((saved.details?.input?.value as any).fixture, true);
+          } else {
+            assert.deepEqual(saved, { id: 'call-1', name: 'browser_get_current_tab', state: 'doing' });
+          }
+        } finally { delete (globalThis as any).__toolError; }
+      });
+    }
     await check(`${kind}: final-only deltas appear before completion exactly once`, async () => {
       const source = gated(kind, 'first '), fixture = make(kind), requests = queue(source.response);
       const done = fixture.run(true); await tick();
@@ -315,4 +355,5 @@ try {
   globalThis.fetch = savedFetch; console.log = savedLog; console.warn = savedWarn; console.error = savedError;
   delete (globalThis as any).__forceRecovery; delete (globalThis as any).__recoveryChecks;
   delete (globalThis as any).__toolCalls;
+  delete (globalThis as any).__toolError;
 }

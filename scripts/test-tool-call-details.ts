@@ -30,7 +30,7 @@ function sourceCallback(name: string): string {
   assert.ok(found, name);
   return `const ${name} = ${found.getText(ast)};`;
 }
-const names = ['mergeToolCallIntoList', 'upsertAssistantMessageInIdb', 'persistMessageNow', 'clearDoingToolCallsInIdb', 'finalizeOffPanelConversationDone', 'getRecordedToolCalls', 'copyToClipboard', 'onCopyToolCallHistory'];
+const names = ['mergeToolCallIntoList', 'upsertAssistantMessageInIdb', 'persistMessageNow', 'clearDoingToolCallsInIdb', 'finalizeOffPanelConversationDone', 'getRecordedToolCalls', 'getVisibleToolCalls', 'shouldShowToolCallHistory', 'toggleToolCallsExpanded', 'copyToClipboard', 'onCopyToolCallHistory'];
 const callbackNames = ['onToolCallStart', 'onToolCallOverride', 'onToolCallDone'];
 const code = (await transform([...names.map(sourceFunction), ...callbackNames.map(sourceCallback),
   `globalThis.api = { ${[...names, ...callbackNames].join(', ')} };`].join('\n'), { loader: 'ts' })).code;
@@ -38,11 +38,15 @@ const rows = new Map<string, any>();
 const live = new Map<string, any>();
 const clone = (value: any) => JSON.parse(JSON.stringify(value));
 let clipboard = '';
+let clipboardWrites = 0;
+let panelBound = true;
+const offPanelWrites: Promise<void>[] = [];
 const sandbox: any = {
   console: { log() {}, warn() {} },
   startToolCallRecord, finishToolCallRecord, mergeToolCallRecord, interruptToolCallRecord, serializeToolCallHistory,
   toolCallCopyFeedback: { value: {} }, window: { setTimeout() {} },
-  navigator: { clipboard: { async writeText(value: string) { clipboard = value; } } },
+  toolCallDetailsEnabled: { value: true }, captureToolCallDetails: true, expandedToolCalls: { value: new Set() },
+  navigator: { clipboard: { async writeText(value: string) { clipboardWrites++; clipboard = value; } } },
   document: { createElement: () => ({ style: {}, focus() {}, select() {} }), execCommand: () => false, body: { appendChild() {}, removeChild() {} } },
   activeStreamMsgId: { value: null }, setConversationThinking() {}, startActivityTool() {}, completeActivityTool() {},
   buildCustomUI: () => undefined,
@@ -61,6 +65,10 @@ const sandbox: any = {
 };
 runInNewContext(code, sandbox);
 sandbox.upsertAssistantMessage = (_conv: string, id: string, _text: string, call: any) => {
+  if (!panelBound) {
+    offPanelWrites.push(sandbox.api.upsertAssistantMessageInIdb(_conv, id, _text, call));
+    return;
+  }
   const row = live.get(id) ?? { id, role: 'assistant', content: '', toolCalls: [] };
   if (call) row.toolCalls = sandbox.api.mergeToolCallIntoList(row.toolCalls, call);
   live.set(id, row);
@@ -71,6 +79,63 @@ async function check(name: string, run: () => void | Promise<void>) {
 }
 const call = (id: string) => ({ id, type: 'function', function: { name: 'browser_execute_script', arguments: '{"script":"return { subtitle: { body: [1,2] } }"}' } });
 
+await check('default and non-boolean opt-in skip argument reads, JSON parsing and result traversal', () => {
+  const tool = { id: 'disabled', function: { name: 'browser_execute_script', get arguments() { throw new Error('arguments must remain unread'); } } };
+  const result = new Proxy({}, {
+    get() { throw new Error('result getters must remain unread'); },
+    ownKeys() { throw new Error('result must not be enumerated'); },
+    getPrototypeOf() { throw new Error('result must not be inspected'); },
+  });
+  const expected = { id: tool.id, name: tool.function.name, state: 'doing' };
+  const parse = JSON.parse;
+  let parses = 0;
+  JSON.parse = () => { parses++; throw new Error('arguments must not be parsed'); };
+  try {
+    assert.deepEqual(startToolCallRecord(tool), expected);
+    assert.deepEqual(finishToolCallRecord(tool, result), expected);
+    for (const disabled of [false, undefined, null, 'true', 1, {}]) {
+      assert.deepEqual(startToolCallRecord(tool, disabled as any), expected);
+      assert.deepEqual(finishToolCallRecord(tool, result, disabled as any), expected);
+      assert.equal(startToolCallRecord(call('unparsed'), disabled as any).details, undefined);
+    }
+  } finally { JSON.parse = parse; }
+  assert.equal(parses, 0);
+});
+await check('default off does not retain cyclic or large payloads', () => {
+  const payload: any = { huge: 'x'.repeat(500_000) };
+  payload.self = payload;
+  const record = finishToolCallRecord(call('large-disabled'), payload);
+  assert.equal(record.details, undefined);
+  assert.ok(JSON.stringify(record).length < 150);
+});
+await check('disabled actual callback cycles persist only minimal status on and off panel', async () => {
+  sandbox.captureToolCallDetails = false;
+  sandbox.toolCallDetailsEnabled.value = false;
+  const tool = { id: 'disabled-call', function: { name: 'browser_execute_script', get arguments() { throw new Error('arguments must remain unread'); } } };
+  const result = { ok: false, get payload() { throw new Error('result payload must remain unread'); } };
+  try {
+    sandbox.api.onToolCallStart('conv', 'disabled-on', tool);
+    await sandbox.api.onToolCallOverride('conv', 'disabled-on', tool, result);
+    sandbox.api.onToolCallDone('conv', 'disabled-on', tool);
+    await sandbox.api.persistMessageNow('disabled-on');
+    assert.deepEqual(rows.get('disabled-on').toolCalls, [{ id: tool.id, name: tool.function.name, state: 'gone' }]);
+    panelBound = false;
+    // Await each source update to exercise the real off-panel persistence path in order.
+    sandbox.api.onToolCallStart('conv', 'disabled-off', tool);
+    await Promise.all(offPanelWrites.splice(0));
+    await sandbox.api.onToolCallOverride('conv', 'disabled-off', tool, result);
+    await Promise.all(offPanelWrites.splice(0));
+    sandbox.api.onToolCallDone('conv', 'disabled-off', tool);
+    await Promise.all(offPanelWrites.splice(0));
+    rows.set('disabled-answer', { id: 'disabled-answer', content: 'answer', toolCalls: [] });
+    await sandbox.api.finalizeOffPanelConversationDone('conv', ['disabled-off', 'disabled-answer']);
+    assert.deepEqual(rows.get('disabled-answer').toolCalls, [{ id: tool.id, name: tool.function.name, state: 'visible' }]);
+  } finally {
+    panelBound = true;
+    sandbox.captureToolCallDetails = true;
+    sandbox.toolCallDetailsEnabled.value = true;
+  }
+});
 await check('five real callback cycles keep five separate inputs and results, including failure', async () => {
   for (let n = 1; n <= 5; n++) {
     const tool = call(String(n));
@@ -92,8 +157,8 @@ await check('actual on-panel persistence survives JSON roundtrip without activit
 });
 await check('actual off-panel start/result/done updates and final collection retain evidence', async () => {
   const tool = call('off');
-  await sandbox.api.upsertAssistantMessageInIdb('conv', 'off-tools', '', startToolCallRecord(tool));
-  await sandbox.api.upsertAssistantMessageInIdb('conv', 'off-tools', '', finishToolCallRecord(tool, { ok: false, message: 'No captions' }));
+  await sandbox.api.upsertAssistantMessageInIdb('conv', 'off-tools', '', startToolCallRecord(tool, true));
+  await sandbox.api.upsertAssistantMessageInIdb('conv', 'off-tools', '', finishToolCallRecord(tool, { ok: false, message: 'No captions' }, true));
   await sandbox.api.upsertAssistantMessageInIdb('conv', 'off-tools', '', { id: 'off', name: tool.function.name, state: 'gone' });
   rows.set('answer', { id: 'answer', content: 'answer', toolCalls: [] });
   await sandbox.api.finalizeOffPanelConversationDone('conv', ['off-tools', 'answer']);
@@ -104,7 +169,7 @@ await check('actual off-panel start/result/done updates and final collection ret
   assert.ok(saved.details.input);
 });
 await check('interrupted calls do not become successful when visibility changes', () => {
-  const record = startToolCallRecord(call('cancelled'));
+  const record = startToolCallRecord(call('cancelled'), true);
   interruptToolCallRecord(record);
   assert.equal(mergeToolCallRecord(record, { ...record, state: 'visible' }).details?.status, 'stopped');
 });
@@ -135,7 +200,7 @@ await check('common credential headers are redacted before persistence or copy',
   assert.ok(!JSON.stringify(preview).includes('fixture-api-secret'));
 });
 await check('malformed arguments are preserved as a diagnostic string', () => {
-  assert.equal(startToolCallRecord({ id: 'bad', function: { name: 'tool', arguments: '{invalid' } }).details?.input?.value, '{invalid');
+  assert.equal(startToolCallRecord({ id: 'bad', function: { name: 'tool', arguments: '{invalid' } }, true).details?.input?.value, '{invalid');
 });
 await check('actual copy action includes all five saved calls and the nested failure evidence', async () => {
   await sandbox.api.onCopyToolCallHistory(live.get('tools'));
@@ -161,6 +226,39 @@ await check('explicit user expansion remains open while the running trace receiv
   trace.expanded = true;
   startToolInTrace(trace, call('manual-tool'), (key) => key);
   assert.equal(trace.expanded, true);
+});
+await check('disabling hides existing history and blocks copy and expansion without deleting it', async () => {
+  const before = clone(live.get('tools'));
+  const copied = clipboard;
+  const writes = clipboardWrites;
+  sandbox.toolCallDetailsEnabled.value = false;
+  try {
+    assert.equal(sandbox.api.shouldShowToolCallHistory({ ...live.get('tools'), toolBarItems: [{ type: 'copy' }] }), false);
+    sandbox.api.toggleToolCallsExpanded('tools');
+    assert.equal(sandbox.expandedToolCalls.value.size, 0);
+    await sandbox.api.onCopyToolCallHistory(live.get('tools'));
+    assert.equal(clipboard, copied);
+    assert.equal(clipboardWrites, writes);
+    assert.deepEqual(clone(live.get('tools')), before);
+  } finally { sandbox.toolCallDetailsEnabled.value = true; }
+});
+await check('an in-flight turn keeps its capture decision when the visible preference changes', async () => {
+  sandbox.captureToolCallDetails = true;
+  sandbox.toolCallDetailsEnabled.value = false;
+  const tool = call('snapshot-on');
+  try {
+    sandbox.api.onToolCallStart('conv', 'snapshot-on', tool);
+    await sandbox.api.onToolCallOverride('conv', 'snapshot-on', tool, { ok: true, value: 'saved' });
+    assert.equal(live.get('snapshot-on').toolCalls[0].details.output.value.value, 'saved');
+    sandbox.captureToolCallDetails = false;
+    sandbox.toolCallDetailsEnabled.value = true;
+    sandbox.api.onToolCallStart('conv', 'snapshot-off', call('snapshot-off'));
+    await sandbox.api.onToolCallOverride('conv', 'snapshot-off', call('snapshot-off'), { ok: true });
+    assert.equal(live.get('snapshot-off').toolCalls[0].details, undefined);
+  } finally {
+    sandbox.captureToolCallDetails = true;
+    sandbox.toolCallDetailsEnabled.value = true;
+  }
 });
 await check('clipboard rejection plus failed fallback reports failure rather than copied', async () => {
   sandbox.navigator.clipboard.writeText = async () => { throw new Error('clipboard unavailable'); };

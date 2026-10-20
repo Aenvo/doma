@@ -50,6 +50,7 @@ const sandbox: any = {
   sanitizeAssistantUserFacing: (value: string) => value,
   readChatMessageProcessMeta: () => undefined, CHAT_MESSAGE_PROCESS_META_KEY: '__stayProcessMeta',
   toolCallCopyFeedback: { value: {} }, window: { setTimeout() {} },
+  toolCallDetailsEnabled: { value: true },
   navigator: { clipboard: { async writeText(value: string) { clipboard = value; } } },
   document: {},
   abortControllersByConversation: new Map(), cancelledConversationIds: new Set(),
@@ -83,11 +84,11 @@ async function check(name: string, run: () => void | Promise<void>) {
   await run(); checks++; console.log(`PASS ${name}`);
 }
 const tool = (id: string) => ({ id, function: { name: 'browser_execute_script', arguments: '{"script":"return window.subtitle"}' } });
-function call(id: string, failed = false) {
-  return { ...mergeToolCallRecord(startToolCallRecord(tool(id)), finishToolCallRecord(tool(id),
-    failed ? { ok: false, error: 'No captions' } : { ok: true, subtitle: { body: [{ content: id }] } })), state: 'gone' };
+function call(id: string, failed = false, captureDetails = true) {
+  return { ...mergeToolCallRecord(startToolCallRecord(tool(id), captureDetails), finishToolCallRecord(tool(id),
+    failed ? { ok: false, error: 'No captions' } : { ok: true, subtitle: { body: [{ content: id }] } }, captureDetails)), state: 'gone' };
 }
-function reset(onPanel = true) {
+function reset(onPanel = true, captureDetails = true) {
   rows.clear(); queue.clear(); sandbox.messages.value = [];
   sandbox.conversationId.value = onPanel ? 'conv' : 'other'; sandbox.turnMessageIds.length = 0;
   sandbox.cancelledConversationIds.clear(); sandbox.abortControllersByConversation.clear();
@@ -95,6 +96,7 @@ function reset(onPanel = true) {
   sandbox.messagePersistConvById.clear();
   clipboard = ''; sandbox.toolCallCopyFeedback.value = {};
   warnings.length = 0;
+  sandbox.toolCallDetailsEnabled.value = captureDetails;
 }
 function add(row: any) {
   const message = { conversationId: 'conv', role: 'assistant', content: '', toolCalls: [], ...row };
@@ -102,12 +104,12 @@ function add(row: any) {
   if (sandbox.conversationId.value === message.conversationId) sandbox.messages.value.push(message);
   return message;
 }
-function fixture(onPanel = true) {
-  reset(onPanel);
-  add({ id: 'old', toolCalls: [call('old-tool')], toolBarItems: [{ type: 'copy', msgIds: ['old'] }] });
-  add({ id: 'root', activityTrace: { status: 'error' }, toolCalls: [call('one'), call('two', true)] });
-  add({ id: 'second', toolCalls: [call('three'), call('four')] });
-  add({ id: 'third', toolCalls: [startToolCallRecord(tool('five'))] });
+function fixture(onPanel = true, captureDetails = true) {
+  reset(onPanel, captureDetails);
+  add({ id: 'old', toolCalls: [call('old-tool', false, captureDetails)], toolBarItems: [{ type: 'copy', msgIds: ['old'] }] });
+  add({ id: 'root', activityTrace: { status: 'error' }, toolCalls: [call('one', false, captureDetails), call('two', true, captureDetails)] });
+  add({ id: 'second', toolCalls: [call('three', false, captureDetails), call('four', false, captureDetails)] });
+  add({ id: 'third', toolCalls: [startToolCallRecord(tool('five'), captureDetails)] });
   for (const id of ['root', 'second', 'third', 'failed-request']) sandbox.api.onMessageStart('conv', id);
   sandbox.abortControllersByConversation.set('conv', { abort() { abortions++; } });
 }
@@ -311,7 +313,7 @@ await check('legacy failed/stopped traces expose saved calls; completed intermed
 });
 await check('runtime tool scaffolding stays hidden until terminal history is ready', () => {
   reset();
-  const running = startToolCallRecord(tool('runtime'));
+  const running = startToolCallRecord(tool('runtime'), true);
   const root = add({ id: 'runtime-root', activityTrace: { status: 'running' }, toolCalls: [running] });
   const intermediate = add({ id: 'runtime-intermediate', toolCalls: [running] });
   assert.equal(sandbox.api.shouldShowToolCallHistory(root), false);
@@ -349,4 +351,28 @@ await check('foreign live source and terminal IDs cannot be relabelled through t
   assert.equal(rows.get('valid').toolCalls[0].id, 'valid-tool');
   assert.ok(rows.get('valid').toolBarItems?.length);
 });
+for (const onPanel of [true, false]) {
+  await check(`default-off ${onPanel ? 'on-panel' : 'off-panel'} failure preserves status without details`, async () => {
+    fixture(onPanel, false);
+    await sandbox.api.onMessageError('conv', 'failed-request', new Error('Default-off fixture failure'));
+    const terminal = rows.get(`terminal-${terminalIndex}`);
+    assert.equal(terminal.content, 'Default-off fixture failure');
+    assert.equal(terminal.toolCalls.length, 5);
+    assert.ok(terminal.toolCalls.every((entry: any) => entry.state === 'visible' && entry.details === undefined));
+    assert.equal(sandbox.api.shouldShowToolCallHistory(terminal), false);
+    await sandbox.api.onCopyToolCallHistory(terminal);
+    assert.equal(clipboard, '');
+  });
+  await check(`default-off ${onPanel ? 'on-panel' : 'off-panel'} cancellation does not invent details`, async () => {
+    fixture(onPanel, false);
+    sandbox.cancelledConversationIds.add('conv');
+    await sandbox.api.onConversationDone('conv', ['root', 'second', 'third']);
+    await new Promise((resolve) => setImmediate(resolve));
+    await Promise.all(queue.values());
+    const terminal = rows.get('third');
+    assert.equal(terminal.toolCalls.length, 5);
+    assert.ok(terminal.toolCalls.every((entry: any) => entry.details === undefined));
+    assert.equal(sandbox.api.shouldShowToolCallHistory(terminal), false);
+  });
+}
 console.log(`Passed ${checks} interrupted-tool-history checks.`);

@@ -625,6 +625,15 @@
                   </button>
                   <span v-if="toolCallCopyFeedback[item.msg.id] === 'failed'" class="toolcall-copy-error" role="status">{{ t('chat.toolCall.copyFailed') }}</span>
                 </div>
+                <div
+                  v-else-if="getVisibleToolCalls(item.msg.toolCalls).length || getDoingToolCalls(item.msg.toolCalls).length"
+                  class="toolcall-header"
+                >
+                  <span class="toolcall-aggregate toolcall-aggregate--static">
+                    <span v-if="getDoingToolCalls(item.msg.toolCalls).length" class="toolcall-calling">{{ t('chat.toolCall.callingAgent') }}</span>
+                    <span v-else class="toolcall-summary">{{ t('chat.toolCall.calledCount', { count: getVisibleToolCalls(item.msg.toolCalls).length }) }}</span>
+                  </span>
+                </div>
               </div>
               </div>
               <div
@@ -897,6 +906,7 @@ import {
   serializeToolCallHistory,
   startToolCallRecord,
 } from "@/services/chat/toolCallDetails";
+import { loadToolCallDetailsPreference, toolCallDetailsEnabled } from "@/services/chat/toolCallHistoryPreference";
 import ConversationPicker from "./ConversationPicker.vue";
 import ChatComposer from "./composer/ChatComposer.vue";
 import CreateExtensionDescDialog from "./composer/CreateExtensionDescDialog.vue";
@@ -4391,7 +4401,7 @@ function shouldShowChatMessageRow(msg: ChatMessage): boolean {
     msg.toolBarItems?.length ||
     getVisibleToolCalls(msg.toolCalls).length ||
     getDoingToolCalls(msg.toolCalls).length ||
-    getRecordedToolCalls(msg.toolCalls).length
+    (toolCallDetailsEnabled.value && getRecordedToolCalls(msg.toolCalls).length)
   );
 }
 
@@ -4796,7 +4806,7 @@ function getRecordedToolCalls(toolCalls: ChatMessageToolCall[] | undefined): Cha
 
 /** Completed intermediate bubbles stay compact; legacy failed traces still expose saved calls. */
 function shouldShowToolCallHistory(msg: ChatMessage): boolean {
-  if (!getRecordedToolCalls(msg.toolCalls).length) return false;
+  if (!toolCallDetailsEnabled.value || !getRecordedToolCalls(msg.toolCalls).length) return false;
   if (msg.activityTrace?.status === "running") return false;
   if (msg.toolBarItems?.length) return true;
   if (msg.activityTrace) {
@@ -4824,6 +4834,7 @@ function isToolCallsExpanded(messageId: string): boolean {
 }
 
 function toggleToolCallsExpanded(messageId: string) {
+  if (!toolCallDetailsEnabled.value) return;
   if (expandedToolCalls.value.has(messageId)) {
     expandedToolCalls.value.delete(messageId);
   } else {
@@ -5154,6 +5165,7 @@ const onKeydownChange = (e: KeyboardEvent) => {
 };
 
 onMounted(() => {
+  void loadToolCallDetailsPreference();
   console.log("[ChatPanel] mount-1 begin", { safari: IS_SAFARI_EXT });
   exitInlineBubbleEdit();
   addRuntimeListener();
@@ -7338,6 +7350,7 @@ async function copyToClipboard(text: string) {
 }
 
 async function onCopyToolCallHistory(msg: ChatMessage): Promise<void> {
+  if (!toolCallDetailsEnabled.value) return;
   const ok = await copyToClipboard(serializeToolCallHistory(getRecordedToolCalls(msg.toolCalls)));
   toolCallCopyFeedback.value = { ...toolCallCopyFeedback.value, [msg.id]: ok ? 'copied' : 'failed' };
   window.setTimeout(() => {
@@ -8269,6 +8282,8 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
       swPingOk: ping.ok,
       swPingMs: ping.elapsedMs,
     });
+    // Keep capture consistent for this turn when another panel changes the preference.
+    const captureToolCallDetails = toolCallDetailsEnabled.value;
     await llmManager.sendMessage(
       persistConvId,
       llmSendText, {
@@ -8297,11 +8312,11 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
         });
         setConversationThinking(convId, false);
         startActivityTool(convId, msgId, toolCall);
-        upsertAssistantMessage(convId, msgId, '', startToolCallRecord(toolCall));
+        upsertAssistantMessage(convId, msgId, '', startToolCallRecord(toolCall, captureToolCallDetails));
       },
       onToolCallOverride: async (convId, msgId, toolCall, result) => {
         completeActivityTool(convId, toolCall, result);
-        upsertAssistantMessage(convId, msgId, '', finishToolCallRecord(toolCall, result));
+        upsertAssistantMessage(convId, msgId, '', finishToolCallRecord(toolCall, result, captureToolCallDetails));
         // 只要返回里带了 doma_show_alert 字段，就优先走这个流程（不依赖 truthy）
         if (!!result && typeof result === "object" && "doma_show_alert" in (result as any)) {
           const alert = (result as any).doma_show_alert as { type?: string } | undefined;
@@ -10556,6 +10571,10 @@ defineExpose({
     font-weight: 600;
     color: var(--stay-black);
     line-height: 16px;
+  }
+
+  .toolcall-aggregate--static {
+    cursor: default;
   }
 
   .toolcall-aggregate .chevron {
