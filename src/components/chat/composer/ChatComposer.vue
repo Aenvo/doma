@@ -35,6 +35,11 @@ const emit = defineEmits<{
   previewAttachedFile: [AttachedFilePreviewPayload];
   /** dock 发送按钮右键「定时消息」 */
   scheduleRequest: [];
+  /**
+   * 手机 sheet：斜杠菜单 / 模式菜单 / 弹框等需要竖直空间时通知父级临时加高。
+   * popover=模式/发送小菜单；menu=/ 与 @；dialog=设置类。
+   */
+  overlayBoostChange: [payload: { active: boolean; kind: "popover" | "menu" | "dialog" }];
 }>();
 
 const { t } = useI18n();
@@ -69,6 +74,40 @@ const jevSetupUi = jevNeedsUserSetup();
  * 避免用户气泡展开 inline composer 时 false→true 滑一下。
  */
 const jevUiReady = ref(!!jevUiSnap);
+
+/** ContextUsage 面板是否打开（子组件上报） */
+const contextUsageOpen = ref(false);
+
+const overlayBoostKind = computed((): false | "popover" | "menu" | "dialog" => {
+  if (props.addSkillDialog?.visible || showJevSetup.value) return "dialog";
+  if (
+    props.slashCommandMenu?.visible ||
+    props.tabMentionMenu?.visible ||
+    contextUsageOpen.value
+  ) {
+    return "menu";
+  }
+  // Ask/Agent、发送菜单很小，不要跟 slash 共用近全屏加高
+  if (modeMenuOpen.value || sendCtxMenuOpen.value) {
+    return "popover";
+  }
+  return false;
+});
+
+watch(
+  overlayBoostKind,
+  (kind) => {
+    emit("overlayBoostChange", {
+      active: !!kind,
+      kind: kind || "menu",
+    });
+  },
+  { immediate: true },
+);
+
+function onContextUsageOpenChange(open: boolean) {
+  contextUsageOpen.value = open;
+}
 
 function applyJevUi(enabled: boolean, configured: boolean) {
   jevConfigured.value = configured;
@@ -549,7 +588,10 @@ defineExpose({
         </div>
 
         <div class="right-controls">
-          <ContextUsageButton :conversation-id="props.conversationId" />
+          <ContextUsageButton
+            :conversation-id="props.conversationId"
+            @open-change="onContextUsageOpenChange"
+          />
           <button
             v-if="loading"
             class="send-btn"
@@ -981,13 +1023,17 @@ html.doma-safari .composer-input-mix {
     background: color-mix(in srgb, var(--stay-black, #2f3134) 14%, transparent);
   }
 
-  /* Ask：用主题色混绿，暗黑下不再「浅绿底 + 浅字」 */
+  /* Ask：与用户气泡同色（浅色 rgb(220,242,220) / 暗黑 #203724） */
   &--ask {
-    background: color-mix(in srgb, #3d9a4a 22%, var(--stay-background, #f8f8f6));
+    background: var(--chat-ask-bubble-bg, rgb(220, 242, 220));
     color: var(--stay-black, #2f3134);
 
     &:hover {
-      background: color-mix(in srgb, #3d9a4a 32%, var(--stay-background, #f8f8f6));
+      background: color-mix(
+        in srgb,
+        var(--stay-black, #2f3134) 8%,
+        var(--chat-ask-bubble-bg, rgb(220, 242, 220))
+      );
     }
   }
 }

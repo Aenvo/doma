@@ -201,7 +201,12 @@ watch(
 watch(
   () => props.visible,
   (open) => {
-    if (open) void nextTick(bumpPosition);
+    if (!open) return;
+    void nextTick(bumpPosition);
+    // 手机 sheet 弹层临时加高有 transition，多跟几次避免仍按矮高度定位
+    window.setTimeout(bumpPosition, 80);
+    window.setTimeout(bumpPosition, 200);
+    window.setTimeout(bumpPosition, 320);
   },
 );
 

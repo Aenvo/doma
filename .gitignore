@@ -57,7 +57,6 @@ src/edition/safariShellChat.pro.ts
 src/edition/activeBrowserTab.pro.ts
 src/edition/editionSwHooks.pro.ts
 src/edition/sendToSidePanel.pro.ts
-src/components/chat/chatPanelSlotsState.ts
 
 src/pages/sidepanel/
 src/pro/

@@ -25,6 +25,8 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from bridge_auth import load_or_create_token
+
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "doma"
 SERVER_VERSION = "0.6.0"
@@ -32,6 +34,7 @@ SERVER_VERSION = "0.6.0"
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONTROL_PORT = int(os.environ.get("DOMA_CONTROL_PORT", "3846"))
 CONTROL_BASE = f"http://127.0.0.1:{CONTROL_PORT}"
+_LOCAL_HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 DAEMON_SCRIPT = os.environ.get(
     "DOMA_DAEMON_SCRIPT",
     os.path.join(HERE, "doma_bridge_daemon.py"),
@@ -234,12 +237,15 @@ def _reply_error(req_id: Any, code: int, message: str) -> None:
 
 def _http_json(method: str, url: str, body: Any = None, timeout: float = 120.0) -> dict[str, Any]:
     data = None
-    headers = {"Accept": "application/json"}
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {load_or_create_token()}",
+    }
     if body is not None:
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
         headers["Content-Type"] = "application/json; charset=utf-8"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with _LOCAL_HTTP.open(req, timeout=timeout) as resp:
         raw = resp.read().decode("utf-8")
         parsed = json.loads(raw) if raw else {}
         if not isinstance(parsed, dict):
@@ -247,12 +253,32 @@ def _http_json(method: str, url: str, body: Any = None, timeout: float = 120.0) 
         return parsed
 
 
-def _health_ok() -> bool:
+def _health_status() -> dict[str, Any] | None:
     try:
         out = _http_json("GET", f"{CONTROL_BASE}/v1/health", timeout=1.5)
-        return bool(out.get("ok"))
+        if out.get("ok") and out.get("role") == "doma-bridge-daemon":
+            return out
     except Exception:
-        return False
+        pass
+    return None
+
+
+def _health_ok() -> bool:
+    out = _health_status()
+    return bool(out and out.get("authRequired") is True)
+
+
+def _stop_daemon() -> None:
+    """Replace/stop the singleton via daemon helpers (no user-facing stop CLI)."""
+    try:
+        # Same install dir as this stdio script → import works when MCP launches us.
+        import doma_bridge_daemon as daemon
+
+        code = daemon.stop_daemon()
+        if code != 0:
+            print(f"[mcp-stdio] stop daemon returned {code}", file=sys.stderr)
+    except Exception as e:
+        print(f"[mcp-stdio] stop daemon failed: {e}", file=sys.stderr)
 
 
 def _spawn_daemon() -> None:
@@ -285,7 +311,21 @@ def _spawn_daemon() -> None:
 
 
 def ensure_daemon() -> None:
-    if _health_ok():
+    """MCP clients own daemon lifecycle: auto-start, and replace outdated instances."""
+    status = _health_status()
+    if status and status.get("authRequired") is not True:
+        print(
+            "[mcp-stdio] outdated daemon on control port; stopping so a new one can start…",
+            file=sys.stderr,
+        )
+        _stop_daemon()
+        status = _health_status()
+        if status and status.get("authRequired") is not True:
+            raise RuntimeError(
+                "DomA bridge daemon is outdated and could not be stopped automatically "
+                f"(control {CONTROL_BASE})"
+            )
+    if status:
         return
     print("[mcp-stdio] daemon not up; starting…", file=sys.stderr)
     try:
@@ -294,7 +334,16 @@ def ensure_daemon() -> None:
         raise RuntimeError(f"failed to spawn DomA bridge daemon: {e}") from e
     deadline = time.time() + ENSURE_TIMEOUT_SEC
     while time.time() < deadline:
-        if _health_ok():
+        status = _health_status()
+        if status and status.get("authRequired") is not True:
+            print(
+                "[mcp-stdio] control port still serves an outdated daemon; retrying stop…",
+                file=sys.stderr,
+            )
+            _stop_daemon()
+            time.sleep(0.2)
+            continue
+        if status:
             print("[mcp-stdio] daemon ready", file=sys.stderr)
             return
         time.sleep(0.2)
@@ -459,7 +508,18 @@ def handle_request(msg: dict[str, Any]) -> None:
                 {"ok": False, "text": str(e), "status": "error"},
                 ensure_ascii=False,
             )
-        _reply(req_id, {"content": [{"type": "text", "text": text}], "isError": False})
+        try:
+            outcome = json.loads(text)
+            if not isinstance(outcome, dict):
+                is_error = True
+            else:
+                status = outcome.get("status")
+                is_error = status == "error" or (
+                    outcome.get("ok") is False and status not in ("pending", "running")
+                )
+        except (TypeError, ValueError):
+            is_error = True
+        _reply(req_id, {"content": [{"type": "text", "text": text}], "isError": is_error})
         return
 
     _reply_error(req_id, -32601, f"Method not found: {method}")

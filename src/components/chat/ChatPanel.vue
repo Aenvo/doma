@@ -3,12 +3,14 @@
     class="chat-panel"
     :class="{
       'chat-panel--safari-shell': IS_SAFARI_EXT,
-      'chat-panel--phone': IS_PHONE_CHAT,
+      'chat-panel--phone': USE_PHONE_VIEW_TOGGLE,
+      'chat-panel--phone-sheet-boost': IS_IPHONE_SHEET && phoneSheetOverlayBoostActive,
+      'chat-panel--ipad-side': IS_IPAD_SIDE,
     }"
   >
     <header
       class="chat-header"
-      :class="{ 'chat-header--phone': IS_PHONE_CHAT }"
+      :class="{ 'chat-header--phone': USE_PHONE_VIEW_TOGGLE }"
     >
       <div class="chat-title-row">
         <div class="chat-header-lead">
@@ -22,7 +24,6 @@
           role="toolbar"
           aria-label="DomA"
           @click.capture="onPhoneHeaderActionsCapture"
-          @pointerup.capture="onPhoneHeaderActionsCapture"
         >
           <button
             class="new-chat-btn header-action-btn"
@@ -89,7 +90,7 @@
           </button>
         </div>
         <button
-          v-if="IS_PHONE_CHAT"
+          v-if="USE_PHONE_VIEW_TOGGLE"
           type="button"
           class="phone-view-toggle-btn"
           :class="phoneComposerVisible ? 'phone-view-toggle-btn--composer' : 'phone-view-toggle-btn--chat'"
@@ -363,7 +364,7 @@
     </header>
     
     <div
-      v-show="!IS_PHONE_CHAT || !phoneComposerVisible"
+      v-show="!USE_PHONE_VIEW_TOGGLE || !phoneComposerVisible"
       class="chat-messages-area"
       :class="{ 'chat-messages-area--skill-drop': skillFileDropActive }"
       @dragenter.prevent="onMessagesAreaDragEnter"
@@ -493,6 +494,7 @@
                 ref="inlineComposerUiRef"
                 v-bind="inlineComposerBinding"
                 @preview-attached-file="openComposerImagePreview"
+                @overlay-boost-change="onComposerOverlayBoostChange"
               />
             </div>
             <div
@@ -713,12 +715,26 @@
       >
         {{ userBubbleMinimapTooltip.preview }}
       </div>
+      <!-- 手机对话态：右下角停止（未跑任务时置灰） -->
+      <button
+        v-if="USE_PHONE_VIEW_TOGGLE && !phoneComposerVisible"
+        type="button"
+        class="phone-chat-stop-fab"
+        :class="{ 'is-idle': !loading }"
+        :disabled="!loading"
+        :title="loading ? t('chat.phoneLayout.stopTask') : t('chat.phoneLayout.taskIdle')"
+        :aria-label="loading ? t('chat.phoneLayout.stopTask') : t('chat.phoneLayout.taskIdle')"
+        @click="onPhoneChatStopClick"
+      >
+        <ChatStopSvg aria-hidden="true" />
+      </button>
       </div>
     </div>
 
     <div
-      v-show="!IS_PHONE_CHAT || phoneComposerVisible"
+      v-show="!USE_PHONE_VIEW_TOGGLE || phoneComposerVisible"
       class="chat-input-row"
+      :style="ipadInputBottomStyle"
       @focusin="onPhoneComposerFocusIn"
       @focusout="onPhoneComposerFocusOut"
     >
@@ -737,6 +753,7 @@
           :hide-collapsed-summary="IS_PHONE_CHAT"
           @change="onConversationSelectChange"
           @close="onConversationPickerClose"
+          @expanded-change="onConversationPickerExpandedChange"
         />
 
         <ChatComposer
@@ -744,6 +761,7 @@
           v-bind="dockComposerBinding"
           @preview-attached-file="openComposerImagePreview"
           @schedule-request="onDockScheduleMessageClick"
+          @overlay-boost-change="onComposerOverlayBoostChange"
         />
       </div>
       <ActionModal
@@ -995,6 +1013,10 @@ import {
   notifyChatPanelSlotsAfterOnboardingDone,
   registerChatPanelSlotsHost,
 } from '@/services/chat/chatPanelSlotsBridge';
+import {
+  showAccountPanel,
+  showDownloader,
+} from '@/components/chat/chatPanelSlotsState';
 import ChatPanelSlots from '@/components/chat/ChatPanelSlots';
 import { openProUpgradeActionModal } from '@/services/chat/proUpgradeModal';
 import ChatNewSvg from "@/assets/images/chat-new.svg";
@@ -1003,6 +1025,7 @@ import ChatHistorySvg from "@/assets/images/chat-history.svg";
 import ChatScheduleSvg from "@/assets/images/chat-schedule.svg";
 import ChatTrashSvg from "@/assets/images/chat-trash.svg";
 import ChatMemorySvg from "@/assets/images/chat-memory.svg";
+import ChatStopSvg from "@/assets/images/chat-stop.svg";
 import ChatEditSvg from "@/assets/images/chat-edit.svg";
 import ChatChevronForwardSvg from "@/assets/images/chat-chevron-forward.svg";
 import ChatCopySvg from "@/assets/images/chat-copy.svg";
@@ -1086,7 +1109,7 @@ import {
   safariShellOnTurnDone,
   safariShellOnUserSend,
 } from "@/edition/safariShellChat";
-import { isPhoneChatLayout } from "@/utils/device";
+import { isIphoneUnfoldedSideLayout, isPhoneChatLayout } from "@/utils/device";
 
 /** Safari 页内壳：禁 tabs/windows；宿主 tab 由 edition(pro) + panelShell 注入 */
 const IS_SAFARI_EXT = isSafariSidePanelShell();
@@ -1094,23 +1117,148 @@ const IS_SAFARI_EXT = isSafariSidePanelShell();
 /** 手机侧栏布局（iPhone / Android 手机；开源语义，非 Safari 特例） */
 const IS_PHONE_CHAT = isPhoneChatLayout();
 
-/** Safari iPhone 底栏 sheet：仅用于向 panelShell 同步高度 */
+/**
+ * 外壳当前布局。iframe 的 src 在首次打开时写死，折叠/展开不会改 URL；
+ * 面板自身宽度也不是整页宽度，不能靠 iframe 视口判断。以 panelShell 推送为准。
+ */
+let liveShellLayout = "";
+
+function urlShellLayout(): string {
+  try {
+    return new URLSearchParams(location.search).get("shellLayout") || "";
+  } catch {
+    return "";
+  }
+}
+
+function effectiveShellLayout(): string {
+  return liveShellLayout || urlShellLayout();
+}
+
+/** Safari iPhone 底栏 sheet：仅用于向 panelShell 同步高度；Duo 展开时改为侧栏 */
 function detectIphoneSheetShell(): boolean {
   if (!IS_SAFARI_EXT) return false;
-  try {
-    const layout = new URLSearchParams(location.search).get("shellLayout");
-    if (layout === "iphone-sheet") return true;
-    if (layout === "side") return false;
-  } catch {
-    // ignore
-  }
+  const layout = effectiveShellLayout();
+  if (layout === "iphone-sheet") return true;
+  if (layout === "side" || layout === "ipad-side") return false;
+  if (isIphoneUnfoldedSideLayout()) return false;
   const ua = navigator.userAgent || "";
   return /iPhone|iPod/i.test(ua);
 }
-const IS_IPHONE_SHEET = detectIphoneSheetShell();
+/** 折叠↔展开会变；模板与脚本都读 .value / 自动解包 */
+const IS_IPHONE_SHEET = ref(detectIphoneSheetShell());
+
+/**
+ * Safari iPad 侧栏：输入区底距用 safe-area 动态垫高（只改 iframe 内，不动 host margin）。
+ * Mac 侧栏不挂。扩展 iframe 里 UA / maxTouchPoints 常不准，多信号兜底。
+ * iPhone Duo 展开视口也走侧栏 safe-bottom。
+ */
+function detectIpadSideShell(): boolean {
+  if (!IS_SAFARI_EXT || detectIphoneSheetShell()) return false;
+  const layout = effectiveShellLayout();
+  if (layout === "iphone-sheet") return false;
+  if (layout === "ipad-side") return true;
+  if (isIphoneUnfoldedSideLayout()) return true;
+
+  const ua = navigator.userAgent || "";
+  if (/iPad/i.test(ua)) return true;
+  if (/Macintosh/i.test(ua) && (navigator.maxTouchPoints || 0) > 1) return true;
+
+  // iframe 里偶发报成 Mac + maxTouchPoints=0：粗指针 + 侧栏布局视为 iPad
+  if (layout === "side" || !layout) {
+    try {
+      if (window.matchMedia?.("(pointer: coarse)").matches) return true;
+    } catch {
+      // ignore
+    }
+  }
+  return false;
+}
+const IS_IPAD_SIDE = ref(detectIpadSideShell());
+if (IS_IPAD_SIDE.value) {
+  console.log("[ChatPanel] ipad-side input safe-bottom enabled");
+}
+
+function refreshSafariShellLayoutFlags() {
+  if (!IS_SAFARI_EXT) return;
+  const nextSheet = detectIphoneSheetShell();
+  const nextIpad = detectIpadSideShell();
+  if (nextSheet !== IS_IPHONE_SHEET.value) IS_IPHONE_SHEET.value = nextSheet;
+  if (nextIpad !== IS_IPAD_SIDE.value) IS_IPAD_SIDE.value = nextIpad;
+}
+
+/**
+ * iPad：侧栏 host 铺满整页；只抬输入区底距（随 safe / 底部系统条动态变）。
+ * 默认 10px 与 .chat-input-row padding 一致，再加上宿主测到的 inset。
+ */
+const IPAD_INPUT_BASE_PAD_PX = 10;
+const IPAD_SAFE_BOTTOM_FALLBACK_PX = 34;
+const ipadSafeBottomPx = ref(IS_IPAD_SIDE.value ? IPAD_SAFE_BOTTOM_FALLBACK_PX : 0);
+const ipadInputBottomStyle = computed(() => {
+  if (!IS_IPAD_SIDE.value) return undefined;
+  const extra = Math.max(0, ipadSafeBottomPx.value);
+  return {
+    paddingBottom: `${IPAD_INPUT_BASE_PAD_PX + extra}px`,
+  };
+});
+
+function applyIpadSafeBottomPx(px: number) {
+  if (!IS_IPAD_SIDE.value) return;
+  const n = Math.max(0, Math.round(Number(px) || 0));
+  ipadSafeBottomPx.value = n > 0 ? n : IPAD_SAFE_BOTTOM_FALLBACK_PX;
+}
+
+function onIpadSafeAreaBottomMessage(ev: MessageEvent) {
+  if (!IS_IPAD_SIDE.value) return;
+  const data = ev?.data;
+  if (!data || data.source !== "doma-panel-shell") return;
+  if (data.operate !== "safariPanel/safeAreaBottom") return;
+  const bottom = typeof data.bottom === "number" ? data.bottom : 0;
+  applyIpadSafeBottomPx(bottom);
+}
+
+/** panelShell 在 Duo 折叠/展开后主动推 layout；URL 不会变，必须以这条消息为准 */
+function onSafariShellLayoutMessage(ev: MessageEvent) {
+  if (!IS_SAFARI_EXT) return;
+  const data = ev?.data;
+  if (!data || data.source !== "doma-panel-shell") return;
+  if (data.operate !== "safariPanel/shellLayout") return;
+  const layout = typeof data.shellLayout === "string" ? data.shellLayout : "";
+  if (layout === "iphone-sheet" || layout === "ipad-side" || layout === "side") {
+    liveShellLayout = layout;
+  }
+  const wasSheet = IS_IPHONE_SHEET.value;
+  refreshSafariShellLayoutFlags();
+  if (wasSheet === IS_IPHONE_SHEET.value) return;
+  if (IS_IPHONE_SHEET.value) {
+    phoneComposerVisible.value = true;
+    syncPhoneSheetHeight();
+  }
+  if (IS_IPAD_SIDE.value) syncIpadInputSafeBottom();
+}
+
+function syncIpadInputSafeBottom() {
+  if (!IS_IPAD_SIDE.value) return;
+  try {
+    window.parent?.postMessage(
+      { source: "doma-sidepanel", operate: "safariPanel/querySafeAreaBottom" },
+      "*",
+    );
+  } catch {
+    // ignore
+  }
+}
 
 /** 手机：true=输入框视图；false=对话内容视图 */
 const phoneComposerVisible = ref(true);
+
+/**
+ * 仅底部 sheet（折叠 iPhone）才「对话↔输入」互斥切换。
+ * Safari 侧栏（含 Duo 展开）与桌面一致：对话和输入同屏。
+ */
+const USE_PHONE_VIEW_TOGGLE = computed(
+  () => IS_PHONE_CHAT && (!IS_SAFARI_EXT || IS_IPHONE_SHEET.value),
+);
 
 type ConversationPickerExpose = {
   expand: () => void;
@@ -1119,43 +1267,95 @@ type ConversationPickerExpose = {
 };
 const conversationPickerRef = ref<ConversationPickerExpose | null>(null);
 
-if (IS_SAFARI_EXT) {
-  initActiveBrowserTabTracking((tab) => {
-    console.log("[ChatPanel] safari host tab", tab);
-  });
-}
+/** Safari 宿主 tab 跟踪 unsubscribe；mount-2 再挂，避免 setup 早期同步回调撞 TDZ */
+let stopSafariHostTabTracking: (() => void) | null = null;
 
 /** 手机 sheet 紧凑高度（输入模式 / 对话未手动滑高时） */
 let phoneSheetCompactHeightPx = 0;
 /** 对话模式手动滑动后升到半屏 */
 let phoneSheetChatExpanded = false;
 const PHONE_SHEET_CHAT_RATIO = 0.5;
+/**
+ * 弹层临时抬高：用接近上限的比例。
+ * 键盘抬起时 visualViewport 变矮，0.64 几乎看不出变化且仍裁切 ~320px 菜单。
+ */
+const PHONE_SHEET_MENU_BOOST_RATIO = 0.88;
+const PHONE_SHEET_DIALOG_BOOST_RATIO = 0.92;
+/** header 展开面板（账户/历史等）：明显矮于 slash/模式菜单，避免整屏发空 */
+const PHONE_SHEET_HEADER_PANEL_BOOST_RATIO = 0.58;
+/** Ask/Agent、发送小菜单：只在紧凑高上多出一块，避免整栏拉满 */
+const PHONE_SHEET_POPOVER_EXTRA_PX = 160;
+/** 登录/会员等 ActionModal：紧凑高 + 弹框实测高，不要整屏拉满 */
+const PHONE_SHEET_ACTION_MODAL_GAP_PX = 20;
+const PHONE_SHEET_ACTION_MODAL_FALLBACK_EXTRA_PX = 168;
+/** 紧凑→半屏：只记上滑起点；半屏后不再用手势改高度 */
 let phoneMessagesTouchStartY = 0;
-let phoneMessagesTouchStartScrollTop = 0;
-/** 本次触摸开始时是否已是半屏（避免刚升高又被同一次下拉收回） */
-let phoneSheetWasExpandedAtTouchStart = false;
 
+type PhoneSheetOverlayBoostKind = "popover" | "menu" | "dialog" | "header" | "action";
+/** Composer UI emit：mode 菜单 / usage / Jev 等 */
+const phoneOverlayBoostFromComposerUi = ref<false | PhoneSheetOverlayBoostKind>(false);
+/** dock/inline 的 slash / @ / AddSkill（直接 watch useChatComposer，更稳） */
+const phoneOverlayBoostFromSlash = ref<false | PhoneSheetOverlayBoostKind>(false);
+/** 历史对话 picker 展开 */
+const phoneOverlayBoostFromPicker = ref(false);
+/** Panel 级大弹框（CreateExtension / Provider） */
+const phoneOverlayBoostFromPanelDialog = ref(false);
+/** ActionModal（登录/会员等）：矮加高 */
+const phoneOverlayBoostFromActionModal = ref(false);
+/** header 展开面板：历史 / 下载 / 临时数据 / 账户等 */
+const phoneOverlayBoostFromHeaderPanel = ref(false);
+
+/** 弹层加高中：输入区贴底，把多出来的高度留给上方菜单（避免只在下部留白） */
+const phoneSheetOverlayBoostActive = computed(
+  () =>
+    !!phoneOverlayBoostFromPanelDialog.value ||
+    !!phoneOverlayBoostFromActionModal.value ||
+    !!phoneOverlayBoostFromHeaderPanel.value ||
+    !!phoneOverlayBoostFromComposerUi.value ||
+    !!phoneOverlayBoostFromSlash.value ||
+    phoneOverlayBoostFromPicker.value,
+);
+
+/**
+ * coverOnly：只改 sheet host 高度，不改网页上下分栏。
+ * `/` 菜单等临时加高必须用这个——若跟拖动一样改 --doma-page-h，收回时网页容易卡在矮高度。
+ */
 function postSheetHeightToShell(payload: {
   heightPx?: number;
   ratio?: number;
   persist?: boolean;
+  coverOnly?: boolean;
 }) {
-  if (!IS_IPHONE_SHEET) return;
+  if (!IS_IPHONE_SHEET.value) return;
   try {
-    window.parent?.postMessage(
-      {
-        source: "doma-sidepanel",
-        operate: "safariPanel/setSheetHeight",
-        heightPx: payload.heightPx,
-        ratio: payload.ratio,
-        persist: payload.persist === true,
-      },
-      "*",
-    );
+    const msg: Record<string, unknown> = {
+      source: "doma-sidepanel",
+      operate: "safariPanel/setSheetHeight",
+      persist: payload.persist === true,
+      coverOnly: payload.coverOnly === true,
+    };
+    // 只带有效字段，避免 heightPx: undefined 干扰 shell 分支判断
+    if (typeof payload.ratio === "number" && Number.isFinite(payload.ratio)) {
+      msg.ratio = payload.ratio;
+    } else if (typeof payload.heightPx === "number" && Number.isFinite(payload.heightPx)) {
+      msg.heightPx = payload.heightPx;
+    } else {
+      return;
+    }
+    window.parent?.postMessage(msg, "*");
   } catch (e) {
     console.warn("[ChatPanel] setSheetHeight postMessage failed", e);
   }
 }
+
+/** 当前是否处于「弹层盖住网页」的加高（与对话半屏分栏无关） */
+let phoneOverlayCoverBoost = false;
+/** 弹层刚 coverOnly 收回后，忽略紧随其后的全量分栏 sync（emit/watch 会连打两次） */
+let phoneSkipFullSheetSyncAfterCover = false;
+/** 加高前的紧凑 host 高；关掉菜单时精确收回，避免 nextTick 晚到的加高把空白撑回来 */
+let phoneSheetHeightBeforeCoverBoostPx = 0;
+/** 作废已排队的 coverOnly 加高（nextTick / 重复 sync） */
+let phoneSheetCoverBoostGen = 0;
 
 /** 量 header+输入区高度并缓存；输入已隐藏时用缓存，避免 v-show 量到 0 */
 function measurePhoneCompactSheetHeightPx(): number {
@@ -1172,10 +1372,131 @@ function measurePhoneCompactSheetHeightPx(): number {
   return phoneSheetCompactHeightPx || 200;
 }
 
-/** Safari 手机 sheet：紧凑高，或对话手动滑高后的半屏 */
+/** 当前是否需要为弹层临时加高（dialog > menu > header > action > popover） */
+function resolvePhoneOverlayBoostKind(): false | PhoneSheetOverlayBoostKind {
+  if (
+    phoneOverlayBoostFromPanelDialog.value ||
+    phoneOverlayBoostFromComposerUi.value === "dialog" ||
+    phoneOverlayBoostFromSlash.value === "dialog"
+  ) {
+    return "dialog";
+  }
+  if (
+    phoneOverlayBoostFromComposerUi.value === "menu" ||
+    phoneOverlayBoostFromSlash.value === "menu" ||
+    phoneOverlayBoostFromPicker.value
+  ) {
+    return "menu";
+  }
+  if (phoneOverlayBoostFromHeaderPanel.value) {
+    return "header";
+  }
+  if (phoneOverlayBoostFromActionModal.value) {
+    return "action";
+  }
+  if (phoneOverlayBoostFromComposerUi.value === "popover") {
+    return "popover";
+  }
+  return false;
+}
+
+function measurePhoneActionModalExtraPx(): number {
+  try {
+    const el = document.querySelector(".action-modal") as HTMLElement | null;
+    const h = el?.getBoundingClientRect().height || 0;
+    if (h > 40) return Math.ceil(h) + PHONE_SHEET_ACTION_MODAL_GAP_PX;
+  } catch {
+    // ignore
+  }
+  return PHONE_SHEET_ACTION_MODAL_FALLBACK_EXTRA_PX;
+}
+
+function phoneOverlayBoostPayload(
+  boost: PhoneSheetOverlayBoostKind,
+): { ratio?: number; heightPx?: number; persist: false; coverOnly: true } {
+  if (boost === "dialog") {
+    return { ratio: PHONE_SHEET_DIALOG_BOOST_RATIO, persist: false, coverOnly: true };
+  }
+  if (boost === "menu") {
+    return { ratio: PHONE_SHEET_MENU_BOOST_RATIO, persist: false, coverOnly: true };
+  }
+  if (boost === "header") {
+    return { ratio: PHONE_SHEET_HEADER_PANEL_BOOST_RATIO, persist: false, coverOnly: true };
+  }
+  const compact = measurePhoneCompactSheetHeightPx();
+  if (boost === "action") {
+    return {
+      heightPx: compact + measurePhoneActionModalExtraPx(),
+      persist: false,
+      coverOnly: true,
+    };
+  }
+  // popover：紧凑高 + 小菜单高度，不要拉到近全屏
+  return {
+    heightPx: compact + PHONE_SHEET_POPOVER_EXTRA_PX,
+    persist: false,
+    coverOnly: true,
+  };
+}
+
+/** Safari 手机 sheet：紧凑高，或对话手动滑高后的半屏；弹层打开时临时抬高 */
 function syncPhoneSheetHeight() {
-  if (!IS_IPHONE_SHEET) return;
+  if (!IS_IPHONE_SHEET.value) return;
+  const boost = resolvePhoneOverlayBoostKind();
+
+  // `/` / 模式菜单 / header / ActionModal 等：只盖 host，绝不改网页分栏
+  if (
+    boost === "dialog" ||
+    boost === "menu" ||
+    boost === "header" ||
+    boost === "action" ||
+    boost === "popover"
+  ) {
+    if (!phoneOverlayCoverBoost) {
+      // 首次进入加高：记下当前紧凑高，供关闭时原样收回
+      phoneSheetHeightBeforeCoverBoostPx = measurePhoneCompactSheetHeightPx();
+    }
+    phoneOverlayCoverBoost = true;
+    const gen = phoneSheetCoverBoostGen;
+    postSheetHeightToShell(phoneOverlayBoostPayload(boost));
+    // 布局（贴底）后再确认一次高度；若中途已关菜单则 gen 变了，不再加高
+    void nextTick(() => {
+      if (gen !== phoneSheetCoverBoostGen) return;
+      const kind = resolvePhoneOverlayBoostKind();
+      if (!kind) return;
+      postSheetHeightToShell(phoneOverlayBoostPayload(kind));
+    });
+    return;
+  }
+
+  // 弹层刚关：只缩回加高前的 host。作废排队中的加高 nextTick，避免空白撑住不回收
+  if (phoneOverlayCoverBoost) {
+    phoneOverlayCoverBoost = false;
+    phoneSheetCoverBoostGen += 1;
+    phoneSkipFullSheetSyncAfterCover = true;
+    const h =
+      phoneSheetHeightBeforeCoverBoostPx > 0
+        ? phoneSheetHeightBeforeCoverBoostPx
+        : measurePhoneCompactSheetHeightPx();
+    phoneSheetHeightBeforeCoverBoostPx = 0;
+    postSheetHeightToShell({ heightPx: h, persist: false, coverOnly: true });
+    void nextTick(() => {
+      phoneSkipFullSheetSyncAfterCover = false;
+    });
+    return;
+  }
+
+  if (phoneSkipFullSheetSyncAfterCover) {
+    return;
+  }
+
+  // 输入 / 对话模式：sheet + 网页一起（拖动同款）
   void nextTick(() => {
+    if (phoneSkipFullSheetSyncAfterCover) return;
+    if (resolvePhoneOverlayBoostKind() || phoneOverlayCoverBoost) {
+      syncPhoneSheetHeight();
+      return;
+    }
     if (!phoneComposerVisible.value && phoneSheetChatExpanded) {
       postSheetHeightToShell({ ratio: PHONE_SHEET_CHAT_RATIO, persist: false });
       return;
@@ -1185,57 +1506,49 @@ function syncPhoneSheetHeight() {
   });
 }
 
-/** 仅手动触摸滑动升高；自动 scrollTop 不走这里 */
+function onComposerOverlayBoostChange(payload: {
+  active: boolean;
+  kind: PhoneSheetOverlayBoostKind;
+}) {
+  if (!IS_IPHONE_SHEET.value) return;
+  phoneOverlayBoostFromComposerUi.value = payload.active ? payload.kind : false;
+  syncPhoneSheetHeight();
+}
+
+function onConversationPickerExpandedChange(expanded: boolean) {
+  if (!IS_IPHONE_SHEET.value) return;
+  phoneOverlayBoostFromPicker.value = expanded;
+  syncPhoneSheetHeight();
+}
+
+/** 仅上滑升高半屏；自动 scrollTop / 下滑 / 半屏后手势都不改高度 */
 function expandPhoneSheetForChatScroll() {
-  if (!IS_PHONE_CHAT || phoneComposerVisible.value) return;
+  if (!USE_PHONE_VIEW_TOGGLE.value || phoneComposerVisible.value) return;
   if (phoneSheetChatExpanded) return;
   phoneSheetChatExpanded = true;
-  if (IS_IPHONE_SHEET) {
+  if (IS_IPHONE_SHEET.value) {
     postSheetHeightToShell({ ratio: PHONE_SHEET_CHAT_RATIO, persist: false });
   }
 }
 
-function collapsePhoneSheetFromChatOverscroll() {
-  if (!IS_PHONE_CHAT || phoneComposerVisible.value) return;
-  if (!phoneSheetChatExpanded) return;
-  phoneSheetChatExpanded = false;
-  syncPhoneSheetHeight();
-}
-
 function onPhoneMessagesTouchStart(ev: TouchEvent) {
-  if (!IS_PHONE_CHAT || phoneComposerVisible.value) return;
+  if (!USE_PHONE_VIEW_TOGGLE.value || phoneComposerVisible.value) return;
+  // 已半屏：不再跟踪手势，把滚动留给浏览器
+  if (phoneSheetChatExpanded) return;
   phoneMessagesTouchStartY = ev.touches[0]?.clientY ?? 0;
-  const box = (ev.currentTarget as HTMLElement | null) || messagesEl.value;
-  phoneMessagesTouchStartScrollTop = box?.scrollTop ?? 0;
-  phoneSheetWasExpandedAtTouchStart = phoneSheetChatExpanded;
 }
 
 function onPhoneMessagesTouchMove(ev: TouchEvent) {
-  if (!IS_PHONE_CHAT || phoneComposerVisible.value) return;
+  if (!USE_PHONE_VIEW_TOGGLE.value || phoneComposerVisible.value) return;
+  if (phoneSheetChatExpanded) return;
   const y = ev.touches[0]?.clientY ?? 0;
-  const dy = y - phoneMessagesTouchStartY; // >0 手指下移
-  const box = (ev.currentTarget as HTMLElement | null) || messagesEl.value;
-  const top = box?.scrollTop ?? 0;
-
-  if (!phoneSheetChatExpanded) {
-    // 仅触摸手势升高；@scroll / 自动滚到底不触发
-    if (Math.abs(dy) > 14) expandPhoneSheetForChatScroll();
-    return;
-  }
-  // 触摸开始时已是半屏，且已在对话顶，继续下拉 → 收回紧凑高
-  if (
-    phoneSheetWasExpandedAtTouchStart &&
-    top <= 1 &&
-    phoneMessagesTouchStartScrollTop <= 1 &&
-    dy > 40
-  ) {
-    collapsePhoneSheetFromChatOverscroll();
-  }
+  const dy = y - phoneMessagesTouchStartY; // <0 手指上移
+  if (dy < -14) expandPhoneSheetForChatScroll();
 }
 
-/** 手机模式：通知宿主页（Safari sheet 等）盖/撤上半页点击挡板 */
+/** 底部 sheet：通知宿主页盖/撤上半页点击挡板（侧栏不同屏切换，不发） */
 function postPhoneComposerActiveToShell(active: boolean) {
-  if (!IS_PHONE_CHAT) return;
+  if (!USE_PHONE_VIEW_TOGGLE.value) return;
   try {
     window.parent?.postMessage(
       {
@@ -1261,12 +1574,12 @@ function blurPhoneComposerInput() {
 }
 
 function onPhoneComposerFocusIn() {
-  if (!IS_PHONE_CHAT || !phoneComposerVisible.value) return;
+  if (!USE_PHONE_VIEW_TOGGLE.value || !phoneComposerVisible.value) return;
   postPhoneComposerActiveToShell(true);
 }
 
 function onPhoneComposerFocusOut(ev: FocusEvent) {
-  if (!IS_PHONE_CHAT) return;
+  if (!USE_PHONE_VIEW_TOGGLE.value) return;
   const row = ev.currentTarget as HTMLElement | null;
   const next = ev.relatedTarget as Node | null;
   if (row && next && row.contains(next)) return;
@@ -1277,23 +1590,24 @@ function onPhoneComposerFocusOut(ev: FocusEvent) {
 }
 
 function onPhoneShellBlurComposerMessage(ev: MessageEvent) {
-  if (!IS_PHONE_CHAT) return;
+  if (!USE_PHONE_VIEW_TOGGLE.value) return;
   const data = ev?.data;
   if (!data || data.source !== "doma-panel-shell") return;
   if (data.operate !== "safariPanel/blurComposer") return;
   blurPhoneComposerInput();
 }
 
+
 function setPhoneComposerVisible(visible: boolean) {
-  if (!IS_PHONE_CHAT) return;
+  if (!USE_PHONE_VIEW_TOGGLE.value) return;
   // 切到对话前先量输入高度，否则下一帧 input 已隐藏
   if (!visible && phoneComposerVisible.value) {
     measurePhoneCompactSheetHeightPx();
   }
   phoneComposerVisible.value = visible;
-  // 每次进对话从紧凑高开始；手动滑再升高。回输入则收回半屏。
+  // 每次进对话从紧凑高开始；手动上滑再升高。回输入则收回半屏。
   phoneSheetChatExpanded = false;
-  phoneMessagesTouchStartScrollTop = 0;
+  phoneMessagesTouchStartY = 0;
   if (!visible) {
     conversationPickerRef.value?.collapse?.();
     blurPhoneComposerInput();
@@ -1305,7 +1619,11 @@ function togglePhoneComposerView() {
   setPhoneComposerVisible(!phoneComposerVisible.value);
 }
 
-/** 手机：点完立刻清掉粘滞 :hover（iOS 上 blur 不够，需短暂关掉 pointer-events） */
+/**
+ * 手机：点完清掉粘滞 :hover。
+ * 注意：绝不能在 pointerup 里立刻 pointer-events:none —— iOS 合成 click 还没到，
+ * 会把新对话/历史/下载等按键「点了没反应」；旁边的 view toggle 不在 actions 里所以正常。
+ */
 function clearPhoneStickyHover(el: HTMLElement | null) {
   if (!el) return;
   try {
@@ -1313,11 +1631,14 @@ function clearPhoneStickyHover(el: HTMLElement | null) {
   } catch {
     // ignore
   }
-  const prev = el.style.pointerEvents;
-  el.style.pointerEvents = "none";
-  window.requestAnimationFrame(() => {
-    el.style.pointerEvents = prev;
-  });
+  // 等本轮 click 冒泡结束再关 pointer-events
+  window.setTimeout(() => {
+    const prev = el.style.pointerEvents;
+    el.style.pointerEvents = "none";
+    window.requestAnimationFrame(() => {
+      el.style.pointerEvents = prev;
+    });
+  }, 50);
 }
 
 function onPhoneViewToggleClick(ev: MouseEvent) {
@@ -1329,8 +1650,8 @@ function onPhoneHeaderActionsCapture(ev: Event) {
   if (!IS_PHONE_CHAT) return;
   const btn = (ev.target as Element | null)?.closest?.("button") as HTMLElement | null;
   if (!btn) return;
-  // 历史 / 下载 / 临时数据等：收起后清掉粘滞高亮
-  window.requestAnimationFrame(() => clearPhoneStickyHover(btn));
+  // 只在 click 捕获（目标按钮 @click 同轮会跑完）后再清粘滞
+  clearPhoneStickyHover(btn);
 }
 
 
@@ -2528,13 +2849,72 @@ function openActionModal(opts: OpenActionModalOptions) {
 
 setChatActionModalOpener(openActionModal);
 
+/** 底部 sheet：弹框统一切回输入态（ActionModal 挂在输入区），再按弹框高度矮加高 */
+function ensurePhoneComposerForOverlayModal() {
+  if (!USE_PHONE_VIEW_TOGGLE.value) return;
+  setPhoneComposerVisible(true);
+}
+
+/** 关掉 ActionModal 后强制收回 sheet（不依赖 coverBoost 标志是否已被其它 sync 打乱） */
+function forcePhoneSheetRestoreAfterActionModal() {
+  if (!IS_IPHONE_SHEET.value) return;
+  phoneOverlayBoostFromActionModal.value = false;
+  // 若还有其它弹层在加高，走统一 sync，勿强行压矮
+  if (resolvePhoneOverlayBoostKind()) {
+    syncPhoneSheetHeight();
+    return;
+  }
+  phoneOverlayCoverBoost = false;
+  phoneSheetCoverBoostGen += 1;
+  phoneSkipFullSheetSyncAfterCover = true;
+  const h =
+    phoneSheetHeightBeforeCoverBoostPx > 0
+      ? phoneSheetHeightBeforeCoverBoostPx
+      : measurePhoneCompactSheetHeightPx();
+  phoneSheetHeightBeforeCoverBoostPx = 0;
+  postSheetHeightToShell({ heightPx: h, persist: false, coverOnly: true });
+  void nextTick(() => {
+    phoneSkipFullSheetSyncAfterCover = false;
+    if (resolvePhoneOverlayBoostKind()) {
+      syncPhoneSheetHeight();
+      return;
+    }
+    // 弹框 DOM 卸掉后再量紧凑高，补一刀收回
+    const h2 = measurePhoneCompactSheetHeightPx();
+    postSheetHeightToShell({ heightPx: h2, persist: false, coverOnly: true });
+  });
+}
+
 watch(showActionModal, (open) => {
   if (!open) {
     actionModalClickHandler.value = null;
     actionModalInviteCode.value = '';
     actionModalInviteLabel.value = '';
+    forcePhoneSheetRestoreAfterActionModal();
+    return;
+  }
+  ensurePhoneComposerForOverlayModal();
+  if (IS_IPHONE_SHEET.value) {
+    // 先等切回输入态布局，再记 before + 按弹框高度加高，避免记成对话半屏高
+    void nextTick(() => {
+      if (!showActionModal.value) return;
+      if (!phoneOverlayCoverBoost) {
+        phoneSheetHeightBeforeCoverBoostPx = measurePhoneCompactSheetHeightPx();
+      }
+      phoneOverlayBoostFromActionModal.value = true;
+      syncPhoneSheetHeight();
+      void nextTick(() => {
+        if (!showActionModal.value) return;
+        syncPhoneSheetHeight();
+      });
+    });
   }
 });
+
+function onPhoneChatStopClick() {
+  if (!loading.value) return;
+  void abortTask();
+}
 
 const onActionModalClick = () => {
   try {
@@ -4257,15 +4637,44 @@ function toggleToolCallsExpanded(messageId: string) {
 
 const taggleSelectPageDom = () => {
   taggleSelect.value = !taggleSelect.value;
+  const taggle = taggleSelect.value;
 
-  getCurrentTab((tabUrl: string, tabId: number)=>{
-    getContext().browser.tabs.sendMessage(tabId, {
-      origin: "sidepanel",
-      operate: "handleSelect",
-      taggle: taggleSelect.value,
-    });
+  // Safari 页内 iframe：与 setOpen 一致，postMessage → panelShell 中转（禁 tabs.sendMessage）
+  if (IS_SAFARI_EXT) {
+    try {
+      window.parent?.postMessage(
+        {
+          source: "doma-sidepanel",
+          operate: "safariPanel/handleSelect",
+          taggle,
+        },
+        "*",
+      );
+    } catch (e) {
+      console.warn("[ChatPanel] handleSelect postMessage failed", e);
+      taggleSelect.value = false;
+    }
+    return;
+  }
+
+  getCurrentTab((_tabUrl: string, tabId: number | null) => {
+    if (tabId == null || !Number.isFinite(tabId)) {
+      console.warn("[ChatPanel] handleSelect: no host tabId");
+      taggleSelect.value = false;
+      return;
+    }
+    try {
+      getContext().browser.tabs.sendMessage(tabId, {
+        origin: "sidepanel",
+        operate: "handleSelect",
+        taggle,
+      });
+    } catch (e) {
+      console.warn("[ChatPanel] handleSelect tabs.sendMessage failed", e);
+      taggleSelect.value = false;
+    }
   });
-}
+};
 
 const dockComposerUiRef = ref<InstanceType<typeof ChatComposer> | null>(null);
 const inlineComposerUiRef = ref<InstanceType<typeof ChatComposer> | null>(null);
@@ -4440,6 +4849,29 @@ const inlineComposerBinding = computed(() => ({
   ...inlineComposer.binding.value,
   onPreviewAttachedFile: openComposerImagePreview,
 }));
+
+/** iPhone sheet：直接跟 slash/@/AddSkill，不依赖子组件 emit */
+watch(
+  [
+    dockComposer.slashMenuOpen,
+    dockComposer.atMenuOpen,
+    dockComposer.showAddSkillDialog,
+    inlineComposer.slashMenuOpen,
+    inlineComposer.atMenuOpen,
+    inlineComposer.showAddSkillDialog,
+  ],
+  ([dockSlash, dockAt, dockSkill, inlineSlash, inlineAt, inlineSkill]) => {
+    if (!IS_IPHONE_SHEET.value) return;
+    if (dockSkill || inlineSkill) {
+      phoneOverlayBoostFromSlash.value = "dialog";
+    } else if (dockSlash || dockAt || inlineSlash || inlineAt) {
+      phoneOverlayBoostFromSlash.value = "menu";
+    } else {
+      phoneOverlayBoostFromSlash.value = false;
+    }
+    syncPhoneSheetHeight();
+  },
+);
 
 function resolveInlineComposerUi(): InstanceType<typeof ChatComposer> | null {
   const raw = inlineComposerUiRef.value;
@@ -4766,17 +5198,49 @@ async function abortTask() {
 
 onMounted(async () => {
   console.log("[ChatPanel] mount-2 begin", { safari: IS_SAFARI_EXT, phone: IS_PHONE_CHAT });
-  if (IS_PHONE_CHAT) {
+  if (USE_PHONE_VIEW_TOGGLE.value) {
     // 默认输入视图；Safari sheet 高度贴合 header+composer
     phoneComposerVisible.value = true;
     syncPhoneSheetHeight();
     window.setTimeout(() => syncPhoneSheetHeight(), 120);
     window.setTimeout(() => syncPhoneSheetHeight(), 400);
-  }
-  if (IS_PHONE_CHAT) {
     window.addEventListener("message", onPhoneShellBlurComposerMessage);
   }
   if (IS_SAFARI_EXT) {
+    // Duo 折叠/展开会切换 sheet↔侧栏；始终监听，标志位变了再 sync
+    window.addEventListener("message", onIpadSafeAreaBottomMessage);
+    window.addEventListener("message", onSafariShellLayoutMessage);
+    const queryShellLayout = () => {
+      try {
+        window.parent?.postMessage(
+          { source: "doma-sidepanel", operate: "safariPanel/queryShellLayout" },
+          "*",
+        );
+      } catch {
+        // ignore
+      }
+    };
+    queryShellLayout();
+    window.setTimeout(queryShellLayout, 200);
+    refreshSafariShellLayoutFlags();
+    if (IS_IPAD_SIDE.value) {
+      syncIpadInputSafeBottom();
+      window.setTimeout(() => syncIpadInputSafeBottom(), 120);
+      window.setTimeout(() => syncIpadInputSafeBottom(), 400);
+    }
+    let shellLayoutResizeTimer = 0;
+    const onSafariViewportMaybeFold = () => {
+      window.clearTimeout(shellLayoutResizeTimer);
+      shellLayoutResizeTimer = window.setTimeout(() => {
+        const wasSheet = IS_IPHONE_SHEET.value;
+        refreshSafariShellLayoutFlags();
+        if (wasSheet === IS_IPHONE_SHEET.value) return;
+        if (IS_IPHONE_SHEET.value) syncPhoneSheetHeight();
+        if (IS_IPAD_SIDE.value) syncIpadInputSafeBottom();
+      }, 120);
+    };
+    window.addEventListener("resize", onSafariViewportMaybeFold, { passive: true });
+    window.addEventListener("orientationchange", onSafariViewportMaybeFold);
     console.warn("[PANEL-RELOAD][iframe] ChatPanel mount-2", {
       href: String(location.href || "").slice(0, 160),
       t: Date.now(),
@@ -4803,6 +5267,12 @@ onMounted(async () => {
     } catch (e) {
       console.warn("[PANEL-RELOAD][iframe] lifecycle listeners failed", e);
     }
+    // 宿主 URL / title 变化 → 写回 conversation.tabInfo（对齐 Chrome tabs.onUpdated）
+    stopSafariHostTabTracking?.();
+    stopSafariHostTabTracking = initActiveBrowserTabTracking((tab) => {
+      console.log("[ChatPanel] safari host tab", tab);
+      void syncSafariHostTabToConversation(tab);
+    });
   }
   registerChatPanelSlotsHost({
     closeSharedPanels: closeSharedHeaderPanels,
@@ -4886,7 +5356,7 @@ function resolveActiveTabId(): Promise<number | undefined> {
   });
 }
 
-/** 页面点选结果 → 写入输入区 chip；tabId 取当前窗口活动标签（侧栏场景下即用户正在看的页） */
+/** 页面点选结果 → 写入输入区 chip；tabId 优先用 content/SW 带回的源 tab（Safari 勿依赖 iframe tabs.query） */
 async function handlePageSelectResultMessage(message: any): Promise<void> {
   if (loading.value) return;
   const body = message?.body;
@@ -4905,7 +5375,11 @@ async function handlePageSelectResultMessage(message: any): Promise<void> {
   const displayText = rawText || mapDomTagToCnLabel(rawType);
   const host = typeof body?.host === "string" ? body.host.trim() : "";
   const favicon = typeof body?.favicon === "string" ? body.favicon : undefined;
-  const activeTabId = await resolveActiveTabId();
+  let activeTabId =
+    parseSourceTabId(message?.sourceTabId) ?? parseSourceTabId(body?.tabId);
+  if (activeTabId == null) {
+    activeTabId = await resolveActiveTabId();
+  }
   if (!host || activeTabId == null) return;
   const struct = buildElementsStructFromCopyMessage({
     host,
@@ -4916,6 +5390,7 @@ async function handlePageSelectResultMessage(message: any): Promise<void> {
     selectors,
   });
   addElementsChipToComposer(struct, "selectedElements");
+  taggleSelect.value = false;
 }
 
 /** content 划词 / background 转发划词 → 待插入区 */
@@ -5000,6 +5475,10 @@ async function dispatchSidePanelRuntimeMessage(message: any): Promise<unknown> {
 
   if (origin === "content" && operate === "pageSelectResult") {
     await handlePageSelectResultMessage(message);
+    return;
+  }
+  if (origin === "content" && operate === "closeCapture") {
+    taggleSelect.value = false;
     return;
   }
   if (
@@ -5610,6 +6089,21 @@ onUnmounted(() => {
     }
     postPhoneComposerActiveToShell(false);
   }
+  if (IS_IPAD_SIDE.value) {
+    try {
+      window.removeEventListener("message", onIpadSafeAreaBottomMessage);
+    } catch {
+      // ignore
+    }
+  }
+  if (stopSafariHostTabTracking) {
+    try {
+      stopSafariHostTabTracking();
+    } catch {
+      // ignore
+    }
+    stopSafariHostTabTracking = null;
+  }
   clearMcpAgentBadge();
   stopMcpBridgeClient();
   registerChatPanelSlotsHost(null);
@@ -5770,6 +6264,59 @@ async function refreshConversationContextList() {
   conversationContextList.value = listConversationContexts();
 }
 
+/**
+ * Safari：无 tabs.onUpdated；panelShell postMessage 宿主 tab 后，
+ * 把 url/icon 写回绑定会话，ConversationPicker host 才能跟着地址栏变。
+ */
+async function syncSafariHostTabToConversation(tab: {
+  id?: number;
+  title?: string;
+  url?: string;
+  favIconUrl?: string;
+}): Promise<void> {
+  const tabId = typeof tab.id === "number" && tab.id > 0 ? tab.id : undefined;
+  if (tabId == null) return;
+
+  const url = typeof tab.url === "string" ? tab.url.trim() : "";
+  const title = typeof tab.title === "string" ? tab.title.trim() : "";
+  const icon = typeof tab.favIconUrl === "string" ? tab.favIconUrl.trim() : "";
+
+  cachedUserTabId = String(tabId);
+  if (url) {
+    cachedUserTabUrl = url;
+    const host = extractHostnameFromUrl(url);
+    if (host) currentHost.value = host;
+  }
+  if (title) cachedUserTabTitle = title;
+  if (icon) currentFavicon.value = icon;
+
+  try {
+    const boundCid = await getConversationIdByTabId(tabId);
+    const panelCid = conversationId.value;
+    const panelCtx = panelCid ? getConversationContext(panelCid) : undefined;
+    const targetCid =
+      boundCid ||
+      (panelCtx && panelCtx.tabId === tabId ? panelCid : undefined);
+    if (!targetCid || !url) return;
+
+    const prev = getConversationContext(targetCid)?.tabInfo;
+    const prevUrl = (prev?.url || "").trim();
+    const prevIcon = (prev?.icon || "").trim();
+    if (prevUrl === url && (!icon || prevIcon === icon)) return;
+
+    upsertConversationContext({
+      conversationId: targetCid,
+      tabInfo: {
+        url,
+        ...(icon ? { icon } : {}),
+      },
+    });
+    await refreshConversationContextList();
+  } catch (e) {
+    console.warn("[ChatPanel] safari host tab sync failed", e);
+  }
+}
+
 async function loadHistoryConversation(conv: HistoryConversationRow) {
   const conversation = getConversationContext(conv.id);
   if (conversation){
@@ -5895,7 +6442,7 @@ async function loadConversation(convId: string | undefined, reason = "unknown") 
 
 async function startNewConversation() {
   if (!conversationId.value) return;
-  if (IS_PHONE_CHAT) {
+  if (USE_PHONE_VIEW_TOGGLE.value) {
     setPhoneComposerVisible(true);
   }
   messages.value = [];
@@ -6329,6 +6876,37 @@ type PendingCreateExtensionSend = {
   opts?: Send2Options;
 };
 const pendingCreateExtensionSend = ref<PendingCreateExtensionSend | null>(null);
+
+/** iPhone sheet：大弹框（创建扩展 / Provider）打开时加高；ActionModal 走矮加高 */
+watch(
+  [showCreateExtensionDescDialog, showProviderSetup],
+  ([a, b]) => {
+    if (a || b) ensurePhoneComposerForOverlayModal();
+    if (!IS_IPHONE_SHEET.value) return;
+    phoneOverlayBoostFromPanelDialog.value = !!(a || b);
+    syncPhoneSheetHeight();
+  },
+);
+
+/**
+ * iPhone sheet：header 展开面板（历史 / 下载 / 临时数据 / 账户 / 定时 / MCP）
+ * 打开 coverOnly 拉高，关闭收回；与模式菜单同级 menu boost。
+ */
+watch(
+  [showHistory, showDbPlus, showScheduled, showMcp, showDownloader, showAccountPanel],
+  ([history, dbPlus, scheduled, mcp, downloader, account]) => {
+    if (!IS_IPHONE_SHEET.value) return;
+    phoneOverlayBoostFromHeaderPanel.value = !!(
+      history ||
+      dbPlus ||
+      scheduled ||
+      mcp ||
+      downloader ||
+      account
+    );
+    syncPhoneSheetHeight();
+  },
+);
 
 function payloadHasCreateExtensionSkill(payload: ComposerSendPayload): boolean {
   if (payload.skillIds.some((id) => id === CREATE_EXTENSION_SKILL)) return true;
@@ -7070,8 +7648,8 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
 
   setConversationLoading(persistConvId, true);
 
-  // 手机布局：发送开任务后切到对话视图，腾出输入区高度
-  if (IS_PHONE_CHAT && !opts?.summarizeTurn) {
+  // 底部 sheet：发送开任务后切到对话视图；侧栏同屏不切
+  if (USE_PHONE_VIEW_TOGGLE.value && !opts?.summarizeTurn) {
     setPhoneComposerVisible(false);
   }
 
@@ -7709,9 +8287,24 @@ defineExpose({
   border-radius: 0;
 }
 
-/* 手机：输入视图时内容顶对齐，避免半屏里输入条沉底 */
+/* iPad 侧栏：host 铺满整页；输入区底距由 :style（ipadInputBottomStyle）动态垫 */
+.chat-panel.chat-panel--ipad-side {
+  overscroll-behavior: none;
+}
+
+/* 手机：输入视图时内容顶对齐，避免紧凑半屏里输入条沉底留白 */
 .chat-panel.chat-panel--phone {
   justify-content: flex-start;
+}
+
+/*
+ * 弹层临时加高时：输入区贴底。
+ * sheet 增高后若仍顶对齐，空白会堆在输入框下方，/ 菜单反而继续贴顶被裁。
+ */
+.chat-panel.chat-panel--phone.chat-panel--phone-sheet-boost {
+  .chat-input-row {
+    margin-top: auto;
+  }
 }
 
 .chat-header {
@@ -8585,6 +9178,47 @@ defineExpose({
     .chat-messages {
       border-radius: 10px;
     }
+  }
+}
+
+/* 与 ChatComposer .send-btn.stop 同尺寸/配色 */
+.phone-chat-stop-fab {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  z-index: 8;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 27px;
+  height: 27px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: var(--stay-primary);
+  color: var(--stay-white);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  box-shadow: none;
+
+  :deep(svg) {
+    width: 10px;
+    height: 10px;
+    display: block;
+    pointer-events: none;
+  }
+
+  &:active:not(:disabled) {
+    transform: scale(0.96);
+  }
+
+  /* 暗色下 --stay-border≈--stay-primary，需额外压低图标对比度才看得出「不可用」 */
+  &.is-idle,
+  &:disabled {
+    background: var(--stay-backgroundTertiary, var(--stay-border));
+    color: var(--stay-secondaryFont, #8a8a8a);
+    opacity: 0.55;
+    cursor: not-allowed;
   }
 }
 

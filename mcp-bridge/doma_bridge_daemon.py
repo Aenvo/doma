@@ -7,6 +7,7 @@ DomA bridge daemon (singleton).
 
 Only one instance should run. Binding control port fails → exit.
 Spawned by doma_mcp_stdio.py via ensure_daemon(), or run manually.
+Outdated instances are replaced by ensure_daemon() (HTTP /v1/shutdown, then port kill).
 
 Env:
   DOMA_CONTROL_PORT   default 3846
@@ -18,22 +19,34 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
+import http.client
 import json
 import os
+import signal
+import socket
 import struct
+import subprocess
 import sys
 import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 from xml.sax.saxutils import escape as xml_escape
 
-SERVER_VERSION = "0.6.2"
+from bridge_auth import load_or_create_token
+
+SERVER_VERSION = "0.6.3"
 CONTROL_PORT = int(os.environ.get("DOMA_CONTROL_PORT", "3846"))
 BRIDGE_PORT = int(os.environ.get("DOMA_BRIDGE_PORT", "3847"))
 BIND_TIMEOUT_SEC = float(os.environ.get("DOMA_BIND_TIMEOUT_SEC", "90"))
+MAX_BRIDGE_MESSAGE_BYTES = 32 * 1024 * 1024
+
+_CONTROL_HTTP: Optional[ThreadingHTTPServer] = None
+_BRIDGE_HTTP: Optional[ThreadingHTTPServer] = None
+_STOP = threading.Event()
 
 _TASKS: dict[str, dict[str, Any]] = {}
 _REQUESTS: dict[str, dict[str, Any]] = {}
@@ -123,6 +136,28 @@ def _payload(ok: bool, text: str, **extra: Any) -> dict[str, Any]:
     out: dict[str, Any] = {"ok": ok, "text": text}
     out.update(extra)
     return out
+
+
+def _valid_loopback_host(host: str, port: int) -> bool:
+    return host.lower() in (f"127.0.0.1:{port}", f"localhost:{port}")
+
+
+def _valid_extension_origin(origin: str) -> bool:
+    try:
+        parsed = urlsplit(origin)
+        port = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme in ("chrome-extension", "moz-extension", "safari-web-extension")
+        and bool(parsed.hostname)
+        and not parsed.path
+        and not parsed.query
+        and not parsed.fragment
+        and parsed.username is None
+        and parsed.password is None
+        and port is None
+    )
 
 
 def build_mcp_send_text(task: str, caller_agent: str) -> str:
@@ -735,7 +770,9 @@ def _ws_recv_text(rfile) -> Optional[str]:
         if len(ext) < 8:
             return None
         length = struct.unpack("!Q", ext)[0]
-    mask = rfile.read(4) if masked else b""
+    if not masked or length > MAX_BRIDGE_MESSAGE_BYTES:
+        return None
+    mask = rfile.read(4)
     payload = rfile.read(length) if length else b""
     if length and len(payload) < length:
         return None
@@ -761,13 +798,14 @@ class BridgeWSHandler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def do_GET(self) -> None:
+        if not _valid_loopback_host(self.headers.get("Host", ""), BRIDGE_PORT):
+            self.send_error(403, "Invalid Host")
+            return
+        if not _valid_extension_origin(self.headers.get("Origin", "")):
+            self.send_error(403, "Invalid extension Origin")
+            return
         if self.headers.get("Upgrade", "").lower() != "websocket":
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(
-                f"DomA bridge daemon; WebSocket on this port. port={BRIDGE_PORT}\n".encode()
-            )
+            self.send_error(400, "WebSocket upgrade required")
             return
 
         key = self.headers.get("Sec-WebSocket-Key")
@@ -775,6 +813,8 @@ class BridgeWSHandler(BaseHTTPRequestHandler):
             self.send_error(400, "Missing Sec-WebSocket-Key")
             return
 
+        # The upgraded socket is owned by this handler; do not parse another HTTP request.
+        self.close_connection = True
         accept = _ws_accept_key(key)
         self.send_response(101, "Switching Protocols")
         self.send_header("Upgrade", "websocket")
@@ -802,7 +842,10 @@ class BridgeWSHandler(BaseHTTPRequestHandler):
 
         try:
             while True:
-                msg = _ws_recv_text(self.rfile)
+                try:
+                    msg = _ws_recv_text(self.rfile)
+                except OSError:
+                    break
                 if msg is None:
                     break
                 if msg == "":
@@ -850,30 +893,51 @@ class ControlHTTPHandler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(raw)
 
+    def _authorized(self) -> bool:
+        if not _valid_loopback_host(self.headers.get("Host", ""), CONTROL_PORT):
+            self._send_json(403, {"ok": False, "text": "invalid Host", "status": "error"})
+            return False
+        # The control API is for local stdio clients, never browser page JavaScript.
+        if self.headers.get("Origin") is not None:
+            self._send_json(403, {"ok": False, "text": "browser Origin forbidden", "status": "error"})
+            return False
+        expected = f"Bearer {load_or_create_token()}"
+        supplied = self.headers.get("Authorization", "").encode("utf-8")
+        if not hmac.compare_digest(supplied, expected.encode("ascii")):
+            self._send_json(401, {"ok": False, "text": "unauthorized", "status": "error"})
+            return False
+        return True
+
     def _read_json_body(self) -> Any:
-        length = int(self.headers.get("Content-Length") or "0")
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError as error:
+            raise ValueError("invalid Content-Length") from error
+        if length < 0:
+            raise ValueError("invalid Content-Length")
+        if length > MAX_BRIDGE_MESSAGE_BYTES:
+            raise OverflowError("request body too large")
         if length <= 0:
             return {}
         raw = self.rfile.read(length)
+        if len(raw) != length:
+            raise ValueError("incomplete request body")
         try:
             return json.loads(raw.decode("utf-8"))
-        except json.JSONDecodeError:
+        except (UnicodeDecodeError, json.JSONDecodeError):
             return None
 
     def do_OPTIONS(self) -> None:
-        self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.end_headers()
+        self.close_connection = True
+        self._send_json(403, {"ok": False, "text": "browser access forbidden", "status": "error"})
 
     def do_GET(self) -> None:
+        if not self._authorized():
+            return
         path = self.path.split("?", 1)[0]
         if path in ("/v1/health", "/health", "/"):
             snap = _agent_snapshot()
@@ -883,6 +947,7 @@ class ControlHTTPHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "role": "doma-bridge-daemon",
                     "version": SERVER_VERSION,
+                    "authRequired": True,
                     "controlPort": CONTROL_PORT,
                     "bridgePort": BRIDGE_PORT,
                     "bridgeConnected": _extension_connected(),
@@ -902,7 +967,19 @@ class ControlHTTPHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = self.path.split("?", 1)[0]
-        body = self._read_json_body()
+        # Always consume the body before auth so a 401 cannot desync HTTP/1.1 keep-alive.
+        try:
+            body = self._read_json_body()
+        except OverflowError:
+            self.close_connection = True
+            self._send_json(413, {"ok": False, "text": "request body too large", "status": "error"})
+            return
+        except ValueError as error:
+            self.close_connection = True
+            self._send_json(400, {"ok": False, "text": str(error), "status": "error"})
+            return
+        if not self._authorized():
+            return
         if body is None:
             self._send_json(400, {"ok": False, "text": "invalid JSON body", "status": "error"})
             return
@@ -955,10 +1032,169 @@ class ControlHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(200, result)
             return
 
+        if path == "/v1/shutdown":
+            self._send_json(200, {"ok": True, "text": "shutting down", "status": "ok"})
+            _STOP.set()
+            return
+
         self._send_json(404, {"ok": False, "text": "not found", "status": "error"})
 
 
+def _control_port_free(port: int, timeout_sec: float = 3.0) -> bool:
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                time.sleep(0.1)
+        except OSError:
+            return True
+    return False
+
+
+def _listener_pids(port: int) -> list[int]:
+    """Best-effort PIDs listening on 127.0.0.1:<port> (for pre-shutdown fallback)."""
+    pids: list[int] = []
+    try:
+        if sys.platform == "win32":
+            completed = subprocess.run(
+                ["netstat", "-ano", "-p", "tcp"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+            needle = f":{port}"
+            for line in completed.stdout.splitlines():
+                if "LISTENING" not in line.upper() or needle not in line:
+                    continue
+                parts = line.split()
+                if not parts:
+                    continue
+                try:
+                    pids.append(int(parts[-1]))
+                except ValueError:
+                    continue
+        else:
+            completed = subprocess.run(
+                ["lsof", f"-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+            for line in completed.stdout.splitlines():
+                line = line.strip()
+                if line.isdigit():
+                    pids.append(int(line))
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return []
+    # Unique, never kill ourselves if somehow listed
+    me = os.getpid()
+    return [p for p in dict.fromkeys(pids) if p != me]
+
+
+def _kill_pids(pids: list[int]) -> None:
+    for pid in pids:
+        try:
+            if sys.platform == "win32":
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/F"],
+                    capture_output=True,
+                    check=False,
+                    timeout=5,
+                )
+            else:
+                os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError, subprocess.TimeoutExpired):
+            continue
+    if sys.platform != "win32":
+        time.sleep(0.35)
+        for pid in pids:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                continue
+            except OSError:
+                continue
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                continue
+
+
+def _post_shutdown() -> tuple[str, Optional[int]]:
+    """Returns (outcome, http_status). outcome: stopped|refused|unauthorized|error|missing."""
+    try:
+        token = load_or_create_token()
+    except Exception as error:
+        return f"token-error:{error}", None
+
+    connection = http.client.HTTPConnection("127.0.0.1", CONTROL_PORT, timeout=2)
+    try:
+        connection.request(
+            "POST",
+            "/v1/shutdown",
+            body=b"{}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "Content-Length": "2",
+                "Host": f"127.0.0.1:{CONTROL_PORT}",
+            },
+        )
+        response = connection.getresponse()
+        response.read()
+        if response.status == 200:
+            return "stopped", response.status
+        if response.status == 401:
+            return "unauthorized", response.status
+        if response.status == 404:
+            return "missing", response.status
+        return "error", response.status
+    except (ConnectionRefusedError, TimeoutError, OSError):
+        return "refused", None
+    finally:
+        connection.close()
+
+
+def stop_daemon() -> int:
+    """Stop the local singleton. Used by MCP stdio ensure_daemon(), not a user CLI."""
+    outcome, status = _post_shutdown()
+    if outcome == "stopped":
+        if _control_port_free(CONTROL_PORT):
+            print(f"[daemon] stopped (control :{CONTROL_PORT})", file=sys.stderr)
+            return 0
+        # Response accepted but process still holding port — fall through to kill.
+    elif outcome == "refused":
+        print(f"[daemon] not running (control :{CONTROL_PORT})", file=sys.stderr)
+        return 0
+
+    pids = _listener_pids(CONTROL_PORT)
+    if not pids:
+        if outcome in ("unauthorized", "missing", "error") or status is not None:
+            print(
+                f"[daemon] control :{CONTROL_PORT} still busy but no PID found "
+                f"(shutdown={outcome} http={status})",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"[daemon] not running (control :{CONTROL_PORT})", file=sys.stderr)
+        return 0
+
+    print(
+        f"[daemon] stopping PID(s) {', '.join(str(p) for p in pids)} on :{CONTROL_PORT}",
+        file=sys.stderr,
+    )
+    _kill_pids(pids)
+    if _control_port_free(CONTROL_PORT):
+        print(f"[daemon] stopped (control :{CONTROL_PORT})", file=sys.stderr)
+        return 0
+    print(f"[daemon] failed to free control :{CONTROL_PORT}", file=sys.stderr)
+    return 1
+
+
 def main() -> None:
+    global _CONTROL_HTTP, _BRIDGE_HTTP
     # Singleton: control port first
     try:
         control = ThreadingHTTPServer(("127.0.0.1", CONTROL_PORT), ControlHTTPHandler)
@@ -976,6 +1212,8 @@ def main() -> None:
         control.server_close()
         sys.exit(1)
 
+    _CONTROL_HTTP = control
+    _BRIDGE_HTTP = bridge
     threading.Thread(target=control.serve_forever, name="doma-control", daemon=True).start()
     threading.Thread(target=bridge.serve_forever, name="doma-bridge-ws", daemon=True).start()
     print(
@@ -984,10 +1222,27 @@ def main() -> None:
         file=sys.stderr,
     )
     try:
-        while True:
-            time.sleep(3600)
+        while not _STOP.wait(timeout=3600):
+            pass
     except KeyboardInterrupt:
-        print("[daemon] shutting down", file=sys.stderr)
+        _STOP.set()
+    print("[daemon] shutting down", file=sys.stderr)
+    try:
+        bridge.shutdown()
+    except Exception:
+        pass
+    try:
+        control.shutdown()
+    except Exception:
+        pass
+    try:
+        bridge.server_close()
+    except Exception:
+        pass
+    try:
+        control.server_close()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
