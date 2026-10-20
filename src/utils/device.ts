@@ -28,6 +28,52 @@ export const isMobile = (): boolean => {
 }
 
 /**
+ * iPhone Duo（折叠屏）展开：视口近方形、短边明显大于单屏 iPhone。
+ * Safari 目前不暴露 Viewport Segments / Device Posture（见 fold 相关文档），
+ * 只能靠 resize 后的视口尺寸区分；折叠约 466×678，展开约 890×626。
+ * 普通 iPhone 横屏短边仍 ~390–440，不会误判。
+ */
+export function isIphoneUnfoldedSideLayout(): boolean {
+  if (typeof window === "undefined") return false;
+  const ua = window.navigator?.userAgent || "";
+  if (!/iPhone|iPod/i.test(ua)) return false;
+
+  try {
+    const segs =
+      typeof (window as unknown as { getWindowSegments?: () => unknown }).getWindowSegments ===
+      "function"
+        ? (window as unknown as { getWindowSegments: () => unknown }).getWindowSegments()
+        : null;
+    if (Array.isArray(segs) && segs.length >= 2) return true;
+  } catch {
+    // ignore
+  }
+  try {
+    if (window.matchMedia?.("(horizontal-viewport-segments: 2)").matches) return true;
+    if (window.matchMedia?.("(vertical-viewport-segments: 2)").matches) return true;
+  } catch {
+    // ignore
+  }
+  try {
+    const posture = (navigator as unknown as { devicePosture?: { type?: string } }).devicePosture
+      ?.type;
+    // continuous ≈ 展平；folded ≈ 折起（若 API 可用）
+    if (posture === "continuous") return true;
+  } catch {
+    // ignore
+  }
+
+  const w = window.innerWidth || 0;
+  const h = window.innerHeight || 0;
+  const minSide = Math.min(w, h);
+  const maxSide = Math.max(w, h);
+  // 短边 ≥520：展开内屏；折叠外屏短边约 466，普通 iPhone 更短
+  if (minSide >= 520) return true;
+  if (maxSide >= 800 && minSide >= 500) return true;
+  return false;
+}
+
+/**
  * 手机聊天布局（iPhone / Android 手机；不含 iPad / 大屏平板）。
  * 用于侧栏紧凑 chrome：藏 host 条、发送后切对话视图等——开源语义是 phone，不是 Safari/iOS 特例。
  */

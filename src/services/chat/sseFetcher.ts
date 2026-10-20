@@ -12,7 +12,7 @@ export type SseEvent = {
     refusalDetected?: boolean;
 };
 
-export const SSE_IDLE_TIMEOUT_MS = 90_000;
+export const SSE_IDLE_TIMEOUT_MS = 180_000;
 
 export class SseIdleTimeoutError extends Error {
   constructor(readonly timeoutMs = SSE_IDLE_TIMEOUT_MS) {

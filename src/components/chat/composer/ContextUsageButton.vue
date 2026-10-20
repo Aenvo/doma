@@ -21,10 +21,19 @@ const usage = computed(() => {
   return getContextUsageSnapshot(props.conversationId);
 });
 
+const emit = defineEmits<{
+  /** 手机 sheet：上下文用量面板打开时需临时加高 */
+  openChange: [open: boolean];
+}>();
+
 const open = ref(false);
 const rootEl = ref<HTMLElement | null>(null);
 const ringBtnEl = ref<HTMLButtonElement | null>(null);
 const panelPosTick = ref(0);
+
+watch(open, (v) => {
+  emit("openChange", v);
+});
 
 const SEGMENT_DEFS = [
   { key: "system" as const, colorVar: "var(--stay-black)", labelKey: "chat.composer.contextUsage.system" },

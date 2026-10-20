@@ -1479,7 +1479,7 @@ async function annotateInteractiveElements(
       : [
           ...kept.filter((c) => SEMANTIC_TAGS.has(c.el.tagName)),
           ...kept.filter((c) => !SEMANTIC_TAGS.has(c.el.tagName)),
-        ];
+    ];
     const items = semanticFirst.slice(0, maxElements);
     // Ax 不用「排名 150 之后」：那些常是已标行里的兄弟节点（日期/内层 span），
     // 会错误画在已有 1–150 的区域上。改为：主内容区已标下沿以下、尚未覆盖的可见可交互。
@@ -2777,10 +2777,10 @@ async function browser_navigate(args: Record<string, unknown>): Promise<unknown>
       await new Promise((r) => setTimeout(r, 900));
       await sendToSidePanel(
         {
-          operate: "chat/runTabHandover",
-          sourceTabId: openerTabId,
-          newTabId,
-          url: finalUrl,
+      operate: "chat/runTabHandover",
+      sourceTabId: openerTabId,
+      newTabId,
+      url: finalUrl,
           // 工具回合内 navigate：新 tab 侧栏看不到 opener 的 loading Set，显式要求续跑
           resume: true,
         },
@@ -2873,11 +2873,11 @@ async function browser_call_tab(args: Record<string, unknown>): Promise<unknown>
   // Safari：投递到目标 tab 的 panelShell（call_tab 已 active 该 tab；payload 给业务）
   void sendToSidePanel(
     {
-      operate: "chat/runCallTab",
-      sourceConversationId,
-      targetTabId,
-      instruction,
-      addonInstruction,
+    operate: "chat/runCallTab",
+    sourceConversationId,
+    targetTabId,
+    instruction,
+    addonInstruction,
     },
     {
       expectResponse: false,
@@ -3504,7 +3504,7 @@ async function browser_execute_script(args: Record<string, unknown>): Promise<un
   if (!tabId) return { error: "no tab" };
   try {
     return await executeArbitraryPageCode(
-      tabId,
+        tabId,
       code,
       (args.allFrames as boolean) || false,
     );
@@ -6423,8 +6423,8 @@ async function setChatPanelSuppressTabBind(suppress: boolean): Promise<void> {
   try {
     await sendToSidePanel(
       {
-        operate: "chat/suppressTabBind",
-        suppress,
+      operate: "chat/suppressTabBind",
+      suppress,
       },
       { expectResponse: false },
     );
@@ -6540,16 +6540,16 @@ async function debugDownloadScreenshotAsync(
     elementCount?: number;
   },
 ): Promise<void> {
-  const ext = mimeType.includes("png") ? "png" : "jpeg";
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const source = (options?.captureSource || "unknown").replace(/[^a-zA-Z0-9_-]/g, "_");
-  const convPart = options?.conversationId
-    ? `-conv-${options.conversationId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 24)}`
-    : "";
-  const somPart =
-    options?.withLabels === false
-      ? "-no-som"
-      : `-som-n${options?.elementCount ?? 0}`;
+    const ext = mimeType.includes("png") ? "png" : "jpeg";
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const source = (options?.captureSource || "unknown").replace(/[^a-zA-Z0-9_-]/g, "_");
+    const convPart = options?.conversationId
+      ? `-conv-${options.conversationId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 24)}`
+      : "";
+    const somPart =
+      options?.withLabels === false
+        ? "-no-som"
+        : `-som-n${options?.elementCount ?? 0}`;
   const leaf = `tab-${tabId}${convPart}${somPart}-full-${source}-${stamp}.${ext}`;
   const filename = `doma-screenshot/${leaf}`;
   console.log("[Screenshot] debug download →", filename, {
@@ -6566,13 +6566,13 @@ async function debugDownloadScreenshotAsync(
   if (typeof browser?.downloads?.download === "function") {
     try {
       const id = await browser.downloads.download({
-        url: `data:${mimeType};base64,${base64}`,
-        filename,
-        saveAs: false,
-      });
+      url: `data:${mimeType};base64,${base64}`,
+      filename,
+      saveAs: false,
+    });
       console.log("[Screenshot] debug download ok (downloads API)", { id, filename });
       return;
-    } catch (e) {
+  } catch (e) {
       console.warn(
         "[Screenshot] downloads API failed, fallback:",
         e instanceof Error ? e.message : String(e),
@@ -6815,7 +6815,7 @@ async function compressImageInTab(
                 h,
               );
             } else {
-              ctx.drawImage(img, 0, 0, w, h);
+            ctx.drawImage(img, 0, 0, w, h);
             }
 
             if (gs) {
@@ -7361,21 +7361,21 @@ async function browser_screenshot(args: Record<string, unknown>): Promise<unknow
       overlayError: blockingOverlay.isError === true,
       overlayMessage: blockingOverlay.message?.slice(0, 80) ?? null,
     });
-    const response: Record<string, unknown> = {
-      ...result,
-      dataUrl: "(base64 data omitted)",
-      captureScope: "full",
+  const response: Record<string, unknown> = {
+    ...result,
+    dataUrl: "(base64 data omitted)",
+    captureScope: "full",
       purpose: intent.purpose,
       goal: intent.goal,
       ...(intent.action ? { action: intent.action } : {}),
       page: pageMeta,
-    };
-    if (withLabels && elements.length > 0) {
-      response.elements = elements;
-      response.somSchema = SOM_ELEMENT_SCHEMA;
-      response.somSchemaVersion = SOM_SCHEMA_VERSION;
-      response.markedCount = elements.length;
-      response.somCap = SOM_MAX_ELEMENTS;
+  };
+  if (withLabels && elements.length > 0) {
+    response.elements = elements;
+    response.somSchema = SOM_ELEMENT_SCHEMA;
+    response.somSchemaVersion = SOM_SCHEMA_VERSION;
+    response.markedCount = elements.length;
+    response.somCap = SOM_MAX_ELEMENTS;
       if (blockingOverlay.present) {
         // LLM+SoM：带回 message/isError，供主模型读错改行为（不只关窗）
         response.blockingOverlay = {
@@ -7389,20 +7389,20 @@ async function browser_screenshot(args: Record<string, unknown>): Promise<unknow
             : {}),
         };
       }
-      if (areas.length > 0) {
-        response.areas = areas.map((a) => ({
-          id: a.id,
-          overflowCount: a.overflowCount,
-        }));
-        response.hint =
-          `SoM 编号已达上限 ${SOM_MAX_ELEMENTS}（本页标了 ${elements.length} 个）。` +
-          `截图上紫色虚线框 A1/A2… 为尚未逐一标注的溢出区域。` +
-          `若目标不在 1–${elements.length}，请调用 browser_screenshot_area({ areaId: "A1" }) 对该区域二次标注后再 click/type；` +
-          `勿猜测未标注元素的 index。编号仅供工具参数使用，勿在对用户回复中提及。`;
-      } else {
-        response.hint =
-          "截图中已标注可交互元素编号（仅供 browser_click / browser_type 等传 index，勿在对用户的回复中提及编号）。elements 使用短 key，含义见 somSchema。";
-      }
+    if (areas.length > 0) {
+      response.areas = areas.map((a) => ({
+        id: a.id,
+        overflowCount: a.overflowCount,
+      }));
+      response.hint =
+        `SoM 编号已达上限 ${SOM_MAX_ELEMENTS}（本页标了 ${elements.length} 个）。` +
+        `截图上紫色虚线框 A1/A2… 为尚未逐一标注的溢出区域。` +
+        `若目标不在 1–${elements.length}，请调用 browser_screenshot_area({ areaId: "A1" }) 对该区域二次标注后再 click/type；` +
+        `勿猜测未标注元素的 index。编号仅供工具参数使用，勿在对用户回复中提及。`;
+    } else {
+      response.hint =
+        "截图中已标注可交互元素编号（仅供 browser_click / browser_type 等传 index，勿在对用户的回复中提及编号）。elements 使用短 key，含义见 somSchema。";
+    }
       const overlayInstr = buildOverlayInstruction(blockingOverlay);
       if (overlayInstr) {
         response.instruction = overlayInstr;
@@ -7504,7 +7504,7 @@ async function browser_screenshot(args: Record<string, unknown>): Promise<unknow
       let calendarDatePicked = false;
 
       console.log("[jev] loop:start", {
-        tabId,
+    tabId,
         goal: intent.goal.slice(0, 80),
         maxSteps,
         valueKeys: Object.keys(remainingValues),
@@ -14923,7 +14923,7 @@ function requestPlanQuestionsFromChatPanel(
       // 等用户填完问卷，超时放宽
       { timeoutMs: 30 * 60_000 },
     );
-    if (!response || typeof response !== "object") {
+        if (!response || typeof response !== "object") {
       throw new Error("plan questions: empty panel response");
     }
     return {

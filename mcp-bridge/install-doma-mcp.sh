@@ -19,6 +19,16 @@ is_windows() {
   return 1
 }
 
+# Native path for Cursor / Windows MCP (Git Bash otherwise prints /c/Users/...)
+to_native_path() {
+  local p="$1"
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "$p"
+  else
+    echo "$p"
+  fi
+}
+
 python_ok() {
   local bin="$1"
   shift
@@ -28,6 +38,21 @@ python_ok() {
 # Sets PYTHON_BIN and PYTHON_PREFIX_ARGS (e.g. py -3)
 PYTHON_BIN=""
 PYTHON_PREFIX_ARGS=()
+
+# `set -u` + empty array: ${arr[*]} / "${arr[@]}" can throw "unbound variable" (bash 4.4+).
+python_prefix_str() {
+  if ((${#PYTHON_PREFIX_ARGS[@]} > 0)); then
+    printf '%s' "${PYTHON_PREFIX_ARGS[*]}"
+  fi
+}
+
+run_python() {
+  if ((${#PYTHON_PREFIX_ARGS[@]} > 0)); then
+    "$PYTHON_BIN" "${PYTHON_PREFIX_ARGS[@]}" "$@"
+  else
+    "$PYTHON_BIN" "$@"
+  fi
+}
 
 resolve_python() {
   PYTHON_BIN=""
@@ -90,7 +115,7 @@ if [[ -n "$EXTENSION_ID" && ( "$INSTALL_DIR" != "$HOME/.doma/mcp" || "$MANAGER_D
   exit 1
 fi
 
-"$PYTHON_BIN" "${PYTHON_PREFIX_ARGS[@]}" - "$SOURCE_DIR" <<'PY'
+run_python - "$SOURCE_DIR" <<'PY'
 import ast, hashlib, json, pathlib, sys
 root = pathlib.Path(sys.argv[1])
 release = json.loads((root / 'doma_mcp_release.json').read_text(encoding='utf-8'))
@@ -115,7 +140,7 @@ if [[ -n "$EXTENSION_ID" ]]; then
     exit 1
   fi
   install -m 755 "$SOURCE_DIR/doma_mcp_manager.py" "$MANAGER_DIR/doma_mcp_manager.py"
-  "$PYTHON_BIN" "${PYTHON_PREFIX_ARGS[@]}" "$MANAGER_DIR/doma_mcp_manager.py" --register "$EXTENSION_ID"
+  run_python "$MANAGER_DIR/doma_mcp_manager.py" --register "$EXTENSION_ID"
   echo '[DomA] Local MCP manager registered. Refresh the connector panel and follow the next step shown there.'
   exit 0
 fi
@@ -130,4 +155,32 @@ done
 install -m 644 "$SOURCE_DIR/bridge_auth.py" "$INSTALL_DIR/bridge_auth.py"
 install -m 755 "$SOURCE_DIR/doma_mcp_stdio.py" "$INSTALL_DIR/doma_mcp_stdio.py"
 install -m 755 "$SOURCE_DIR/doma_bridge_daemon.py" "$INSTALL_DIR/doma_bridge_daemon.py"
-echo '[DomA] Local MCP companion installed. Add its stdio script to your desktop agent configuration.'
+STDIO_ABS="$(cd "$INSTALL_DIR" && pwd)/doma_mcp_stdio.py"
+STDIO_NATIVE="$(to_native_path "$STDIO_ABS")"
+PY_NATIVE="$(to_native_path "$PYTHON_BIN")"
+
+echo ""
+echo "[DomA] installed successfully."
+echo "[DomA] Paste the following into your MCP client config (e.g. Cursor ~/.cursor/mcp.json):"
+echo ""
+# Machine-readable block for UIs that scrape between markers
+echo "-----BEGIN DOMA_MCP_JSON-----"
+DOMA_MCP_CMD="$PY_NATIVE" DOMA_MCP_STDIO="$STDIO_NATIVE" DOMA_MCP_PREFIX="$(python_prefix_str)" \
+run_python - <<'PY'
+import json, os
+cmd = os.environ["DOMA_MCP_CMD"]
+stdio = os.environ["DOMA_MCP_STDIO"]
+prefix = [p for p in os.environ.get("DOMA_MCP_PREFIX", "").split() if p]
+print(json.dumps({
+  "mcpServers": {
+    "DomA": {
+      "command": cmd,
+      "args": prefix + [stdio],
+    }
+  }
+}, indent=2, ensure_ascii=False))
+PY
+echo "-----END DOMA_MCP_JSON-----"
+echo ""
+echo "[DomA] The MCP client starts/replaces the local daemon automatically — no manual start/stop."
+echo ""

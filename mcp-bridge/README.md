@@ -58,9 +58,11 @@ downgrade and refuses to stop a daemon with active conversations. On a working
 daemon it stops, replaces files, restarts, and restores the previous files if
 the replacement fails. Desktop agents must restart to load new stdio tools.
 If the panel reports an outdated manager, rerun the local one-time installer
-from the updated fork. The first transition from an older daemon without
-`/v1/admin/stop` requires manually stopping that old daemon before installing
-the companion in the panel.
+from the updated fork. Desktop MCP clients also start the daemon when missing
+and automatically replace older instances using `/v1/shutdown`; this alias shares the manager stop endpoint's
+active-conversation protection. A newer daemon is left in place and asks the
+desktop client to restart. The manager still requires `/v1/admin/stop` support
+for its transactional update path.
 
 **Uninstall companion** stops the daemon and removes only the known MCP
 companion files, local token, and daemon log. It leaves the native manager and
@@ -82,9 +84,10 @@ fork or its local installer files together with the extension; an extension
 package alone cannot register a Native Messaging host.
 
 The stdio client and daemon share a per-user token in `~/.doma/mcp/bridge-auth-token`.
-The file is created on first use and must remain private. Existing daemon processes
-from older releases must be stopped before using the updated client. The control
-HTTP endpoint accepts authenticated local clients only; browser pages cannot call it.
+The file is created on first use and must remain private. The updated stdio client
+replaces outdated daemon processes automatically, except while conversations are
+active; wait for them to finish before retrying. The control HTTP endpoint accepts
+authenticated local clients only; browser pages cannot call it.
 WebSocket connections are limited to browser extension origins.
 This Origin check blocks ordinary web pages, but it does not authenticate the
 extension: another extension or a local process can still connect. Pairing the
@@ -97,10 +100,13 @@ only if a documented attachment workflow requires larger payloads.
 
 | Port | Role |
 |------|------|
-| `3846` | Control HTTP (`/v1/health`, `/v1/conversations/...`, `/v1/agents/heartbeat`) |
+| `3846` | Control HTTP (`/v1/health`, `/v1/conversations/...`, `/v1/agents/heartbeat`, `/v1/admin/stop`, `/v1/shutdown`) |
 | `3847` | Extension WebSocket (fixed) |
 
 ## Cursor / other agents
+
+The local shell installer prints a ready-to-paste JSON block with native Windows
+paths and the selected Python launcher prefix when applicable.
 
 ```json
 {
@@ -142,15 +148,16 @@ an explicit error after 30 minutes by default (`DOMA_TASK_TIMEOUT_SEC`).
 
 The side panel collapses MCP turns by default and can expand the original messages.
 It sends terminal results until the daemon acknowledges them. After upgrading the
-bridge scripts, restart any older daemon and reload the unpacked extension.
+bridge scripts, restart desktop MCP clients and reload the unpacked extension.
 
-## Manual daemon (optional)
+## Manual daemon (optional, developers)
 
 ```bash
 python3 mcp-bridge/doma_bridge_daemon.py
 ```
 
 If already running, a second start exits quietly (control port busy).
+Production clients should rely on MCP `ensure_daemon()` instead of running this by hand.
 
 ## DomA CLI (separate track)
 

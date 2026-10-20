@@ -1,6 +1,7 @@
 import { isProEdition } from "@/config/buildEdition";
 import { getContext } from "@/services/Context";
 import { Storage } from "@/store/Storage";
+import { isSafariBuild } from "@/utils/safariBuild";
 
 export const QUICK_MESSAGES_STORAGE_KEY = "doma_quick_messages_v1";
 
@@ -23,22 +24,30 @@ const OPEN_DEFAULT_ITEMS: QuickMessageItem[] = [
   { id: "default-advance-next-step", kind: "default", defaultKey: "advanceNextStep" },
 ];
 
-/** 仅 Pro：下载视频 / 屏蔽广告 */
+/** 仅 Pro：下载视频 / 屏蔽广告（Safari 不提供下载视频推荐） */
 const PRO_ONLY_DEFAULT_ITEMS: QuickMessageItem[] = [
   { id: "default-download-video", kind: "default", defaultKey: "downloadVideo" },
   { id: "default-block-ads", kind: "default", defaultKey: "blockAds" },
 ];
 
+function getProOnlyDefaultItems(): QuickMessageItem[] {
+  if (isSafariBuild()) {
+    return PRO_ONLY_DEFAULT_ITEMS.filter((x) => x.defaultKey !== "downloadVideo");
+  }
+  return PRO_ONLY_DEFAULT_ITEMS;
+}
+
 function getDefaultItems(): QuickMessageItem[] {
   return isProEdition()
-    ? [...OPEN_DEFAULT_ITEMS, ...PRO_ONLY_DEFAULT_ITEMS]
+    ? [...OPEN_DEFAULT_ITEMS, ...getProOnlyDefaultItems()]
     : OPEN_DEFAULT_ITEMS.map((x) => ({ ...x }));
 }
 
 function getDefaultKeys(): Set<QuickMessageDefaultKey> {
   const keys: QuickMessageDefaultKey[] = ["summarize", "advanceNextStep"];
   if (isProEdition()) {
-    keys.push("downloadVideo", "blockAds");
+    if (!isSafariBuild()) keys.push("downloadVideo");
+    keys.push("blockAds");
   }
   return new Set(keys);
 }

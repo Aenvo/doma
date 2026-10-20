@@ -66,5 +66,61 @@
     "userscriptUnknownError": {
         "message": "未知错误",
         "description": ""
+    },
+    "safari_action_opening": {
+        "message": "正在打开…",
+        "description": "Safari 工具栏 popup：进行中"
+    },
+    "safari_action_closing": {
+        "message": "正在关闭…",
+        "description": "Safari 工具栏 popup：关闭中"
+    },
+    "safari_action_opened": {
+        "message": "已打开",
+        "description": "Safari 工具栏 popup：侧栏已开"
+    },
+    "safari_action_closed": {
+        "message": "已关闭",
+        "description": "Safari 工具栏 popup：侧栏已关"
+    },
+    "safari_action_done": {
+        "message": "完成",
+        "description": "Safari 工具栏 popup：通用成功"
+    },
+    "safari_action_failed": {
+        "message": "出了点问题",
+        "description": "Safari 工具栏 popup：通用失败"
+    },
+    "safari_action_no_background": {
+        "message": "后台未就绪",
+        "description": "Safari 工具栏 popup：SW 不可用"
+    },
+    "safari_action_toggle_failed": {
+        "message": "切换失败",
+        "description": "备用；popup 优先展示 SW/侧栏原文"
+    },
+    "safari_action_allow_site": {
+        "message": "请先允许 DomA 访问此网站（Safari · aA · 网站设置），再点一次 DomA 图标。",
+        "description": "Safari 工具栏 popup：需要站点权限"
+    },
+    "safari_action_restricted": {
+        "message": "此页面无法承载 DomA。请打开普通网页后再试。",
+        "description": "Safari 工具栏 popup：受限 URL"
+    },
+    "safari_action_no_tab": {
+        "message": "没有可用的网页标签。请切换到网页后再点 DomA 图标。",
+        "description": "Safari 工具栏 popup：无 active tab"
+    },
+    "safari_action_shell_failed": {
+        "message": "页面内壳层未响应。请刷新本页后再点 DomA 图标。",
+        "description": "Safari 工具栏 popup：panel shell 打开失败"
+    },
+    "safari_action_background_retry": {
+        "message": "后台无回包。请再点一次 DomA 图标；若仍失败，请彻底退出 Safari 后重开。",
+        "description": "Safari 工具栏 popup：SW 休眠 / 无回包"
+    },
+    "safari_action_retry_hint": {
+        "message": "请再点一次 DomA 图标重试。",
+        "description": "Safari 工具栏 popup：简短重试提示"
     }
 }

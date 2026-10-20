@@ -7,6 +7,7 @@ DomA bridge daemon (singleton).
 
 Only one instance should run. Binding control port fails → exit.
 Spawned by doma_mcp_stdio.py via ensure_daemon(), or run manually.
+Outdated instances are replaced by ensure_daemon() (HTTP /v1/shutdown, then port kill).
 
 Env:
   DOMA_CONTROL_PORT   default 3846
@@ -19,9 +20,13 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import http.client
 import json
 import os
+import signal
+import socket
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -33,7 +38,7 @@ from xml.sax.saxutils import escape as xml_escape
 
 from bridge_auth import load_or_create_token
 
-SERVER_VERSION = "0.7.11"
+SERVER_VERSION = "0.7.12"
 BRIDGE_PROTOCOL_VERSION = 1
 CONTROL_PORT = int(os.environ.get("DOMA_CONTROL_PORT", "3846"))
 BRIDGE_PORT = int(os.environ.get("DOMA_BRIDGE_PORT", "3847"))
@@ -1351,9 +1356,8 @@ class ControlHTTPHandler(BaseHTTPRequestHandler):
         self._send_json(404, {"ok": False, "text": "not found", "status": "error"})
 
     def do_POST(self) -> None:
-        if not self._authorized():
-            return
         path = self.path.split("?", 1)[0]
+        # Always consume the body before auth so a 401 cannot desync HTTP/1.1 keep-alive.
         try:
             body = self._read_json_body()
         except OverflowError:
@@ -1363,6 +1367,8 @@ class ControlHTTPHandler(BaseHTTPRequestHandler):
         except ValueError as error:
             self.close_connection = True
             self._send_json(400, {"ok": False, "text": str(error), "status": "error"})
+            return
+        if not self._authorized():
             return
         if body is None:
             self._send_json(400, {"ok": False, "text": "invalid JSON body", "status": "error"})
@@ -1376,7 +1382,7 @@ class ControlHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"ok": True, **snap})
             return
 
-        if path == "/v1/admin/stop":
+        if path in ("/v1/admin/stop", "/v1/shutdown"):
             with _TASKS_LOCK:
                 _expire_tasks_locked(time.time())
                 busy = any(rec.get("status") in ("pending", "running") for rec in _TASKS.values()) or any(
@@ -1431,6 +1437,164 @@ class ControlHTTPHandler(BaseHTTPRequestHandler):
             return
 
         self._send_json(404, {"ok": False, "text": "not found", "status": "error"})
+
+
+def _control_port_free(port: int, timeout_sec: float = 3.0) -> bool:
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                time.sleep(0.1)
+        except OSError:
+            return True
+    return False
+
+
+def _listener_pids(port: int) -> list[int]:
+    """Best-effort PIDs listening on 127.0.0.1:<port> (for pre-shutdown fallback)."""
+    pids: list[int] = []
+    try:
+        if sys.platform == "win32":
+            completed = subprocess.run(
+                ["netstat", "-ano", "-p", "tcp"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+            needle = f":{port}"
+            for line in completed.stdout.splitlines():
+                if "LISTENING" not in line.upper() or needle not in line:
+                    continue
+                parts = line.split()
+                if not parts:
+                    continue
+                try:
+                    pids.append(int(parts[-1]))
+                except ValueError:
+                    continue
+        else:
+            completed = subprocess.run(
+                ["lsof", f"-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+            for line in completed.stdout.splitlines():
+                line = line.strip()
+                if line.isdigit():
+                    pids.append(int(line))
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return []
+    # Unique, never kill ourselves if somehow listed
+    me = os.getpid()
+    return [p for p in dict.fromkeys(pids) if p != me]
+
+
+def _kill_pids(pids: list[int]) -> None:
+    for pid in pids:
+        try:
+            if sys.platform == "win32":
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/F"],
+                    capture_output=True,
+                    check=False,
+                    timeout=5,
+                )
+            else:
+                os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError, subprocess.TimeoutExpired):
+            continue
+    if sys.platform != "win32":
+        time.sleep(0.35)
+        for pid in pids:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                continue
+            except OSError:
+                continue
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                continue
+
+
+def _post_shutdown() -> tuple[str, Optional[int]]:
+    """Returns (outcome, http_status). outcome: stopped|busy|refused|unauthorized|error|missing."""
+    try:
+        token = load_or_create_token()
+    except Exception as error:
+        return f"token-error:{error}", None
+
+    connection = http.client.HTTPConnection("127.0.0.1", CONTROL_PORT, timeout=2)
+    try:
+        connection.request(
+            "POST",
+            "/v1/shutdown",
+            body=b"{}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "Content-Length": "2",
+                "Host": f"127.0.0.1:{CONTROL_PORT}",
+            },
+        )
+        response = connection.getresponse()
+        response.read()
+        if response.status == 200:
+            return "stopped", response.status
+        if response.status == 409:
+            return "busy", response.status
+        if response.status == 401:
+            return "unauthorized", response.status
+        if response.status == 404:
+            return "missing", response.status
+        return "error", response.status
+    except (ConnectionRefusedError, TimeoutError, OSError):
+        return "refused", None
+    finally:
+        connection.close()
+
+
+def stop_daemon() -> int:
+    """Stop the local singleton. Used by MCP stdio ensure_daemon(), not a user CLI."""
+    outcome, status = _post_shutdown()
+    if outcome == "busy":
+        print("[daemon] active conversations; refusing to stop", file=sys.stderr)
+        return 1
+    if outcome == "stopped":
+        if _control_port_free(CONTROL_PORT):
+            print(f"[daemon] stopped (control :{CONTROL_PORT})", file=sys.stderr)
+            return 0
+        # Response accepted but process still holding port — fall through to kill.
+    elif outcome == "refused":
+        print(f"[daemon] not running (control :{CONTROL_PORT})", file=sys.stderr)
+        return 0
+
+    pids = _listener_pids(CONTROL_PORT)
+    if not pids:
+        if outcome in ("unauthorized", "missing", "error") or status is not None:
+            print(
+                f"[daemon] control :{CONTROL_PORT} still busy but no PID found "
+                f"(shutdown={outcome} http={status})",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"[daemon] not running (control :{CONTROL_PORT})", file=sys.stderr)
+        return 0
+
+    print(
+        f"[daemon] stopping PID(s) {', '.join(str(p) for p in pids)} on :{CONTROL_PORT}",
+        file=sys.stderr,
+    )
+    _kill_pids(pids)
+    if _control_port_free(CONTROL_PORT):
+        print(f"[daemon] stopped (control :{CONTROL_PORT})", file=sys.stderr)
+        return 0
+    print(f"[daemon] failed to free control :{CONTROL_PORT}", file=sys.stderr)
+    return 1
 
 
 def main() -> None:

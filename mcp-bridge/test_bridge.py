@@ -130,6 +130,74 @@ class BridgeAccessTests(unittest.TestCase):
             self.assertTrue(any(task in str(req.get("sendText")) for req in daemon._REQUESTS.values()))
 
 
+    def test_unauthorized_post_consumes_body_before_next_keepalive_request(self) -> None:
+        connection = http.client.HTTPConnection("127.0.0.1", daemon.CONTROL_PORT, timeout=2)
+        try:
+            connection.request("POST", "/v1/shutdown", body=b"{}")
+            response = connection.getresponse()
+            self.assertEqual(response.status, 401)
+            response.read()
+            connection.request("GET", "/v1/health", headers={"Authorization": f"Bearer {self.token}"})
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(json.loads(response.read())["version"], daemon.SERVER_VERSION)
+        finally:
+            connection.close()
+
+    def test_shutdown_alias_refuses_active_work(self) -> None:
+        stop_requested = threading.Event()
+        with mock.patch.object(daemon, "_TASKS", {"active": {"status": "running"}}), \
+             mock.patch.object(daemon, "_REQUESTS", {}), \
+             mock.patch.object(daemon, "_STOP_REQUESTED", stop_requested):
+            connection = http.client.HTTPConnection("127.0.0.1", daemon.CONTROL_PORT, timeout=2)
+            try:
+                connection.request("POST", "/v1/shutdown", body=b"{}", headers={"Authorization": f"Bearer {self.token}"})
+                response = connection.getresponse()
+                self.assertEqual(response.status, 409)
+                self.assertEqual(json.loads(response.read())["status"], "busy")
+            finally:
+                connection.close()
+            self.assertFalse(stop_requested.is_set())
+
+    def test_shutdown_requires_auth_and_sets_stop_flag(self) -> None:
+        daemon._STOP_REQUESTED.clear()
+        connection = http.client.HTTPConnection("127.0.0.1", daemon.CONTROL_PORT, timeout=2)
+        try:
+            connection.request(
+                "POST",
+                "/v1/shutdown",
+                body=b"{}",
+                headers={"Content-Type": "application/json", "Content-Length": "2"},
+            )
+            response = connection.getresponse()
+            self.assertEqual(response.status, 401)
+            response.read()
+        finally:
+            connection.close()
+        self.assertFalse(daemon._STOP_REQUESTED.is_set())
+
+        connection = http.client.HTTPConnection("127.0.0.1", daemon.CONTROL_PORT, timeout=2)
+        try:
+            connection.request(
+                "POST",
+                "/v1/shutdown",
+                body=b"{}",
+                headers={
+                    "Authorization": f"Bearer {self.token}",
+                    "Content-Type": "application/json",
+                    "Content-Length": "2",
+                },
+            )
+            response = connection.getresponse()
+            body = json.loads(response.read())
+            self.assertEqual(response.status, 200)
+            self.assertTrue(body["ok"])
+        finally:
+            connection.close()
+        self.assertTrue(daemon._STOP_REQUESTED.is_set())
+        daemon._STOP_REQUESTED.clear()
+
+
 class BridgeConversationRecoveryTests(unittest.TestCase):
     """Exercise routing in memory, without a daemon, socket, or browser."""
 
@@ -888,14 +956,84 @@ class BridgeProtocolTests(unittest.TestCase):
         finally:
             stdio.call_get = original
 
-    def test_old_daemon_is_rejected_before_a_new_spawn(self) -> None:
-        original = stdio._health_status
+    def test_unknown_control_service_is_not_stopped(self) -> None:
+        foreign = {"ok": True, "role": "unrelated-service", "authRequired": True}
+        with mock.patch.object(stdio, "_http_json", return_value=foreign), \
+             mock.patch.object(stdio, "_stop_daemon") as stop, \
+             mock.patch.object(stdio, "_spawn_daemon") as spawn, \
+             mock.patch.object(stdio, "ENSURE_TIMEOUT_SEC", 0):
+            with self.assertRaisesRegex(RuntimeError, "did not become ready"):
+                stdio.ensure_daemon()
+            stop.assert_not_called()
+            spawn.assert_called_once_with()
+
+    def test_busy_shutdown_does_not_fall_back_to_killing(self) -> None:
+        with mock.patch.object(daemon, "_post_shutdown", return_value=("busy", 409)), \
+             mock.patch.object(daemon, "_listener_pids") as listeners, \
+             mock.patch.object(daemon, "_kill_pids") as kill:
+            self.assertEqual(daemon.stop_daemon(), 1)
+            listeners.assert_not_called()
+            kill.assert_not_called()
+
+    def test_old_authenticated_version_is_replaced(self) -> None:
+        old = {"ok": True, "role": "doma-bridge-daemon", "authRequired": True, "version": "0.7.11"}
+        ready = {**old, "version": stdio.SERVER_VERSION}
+        with mock.patch.object(stdio, "_health_status", side_effect=[old, None, ready]), \
+             mock.patch.object(stdio, "_stop_daemon") as stop, \
+             mock.patch.object(stdio, "_spawn_daemon") as spawn:
+            stdio.ensure_daemon()
+            stop.assert_called_once_with()
+            spawn.assert_called_once_with()
+
+    def test_newer_daemon_is_preserved_until_client_restart(self) -> None:
+        ready = {"ok": True, "role": "doma-bridge-daemon", "authRequired": True, "version": "0.7.13"}
+        with mock.patch.object(stdio, "_health_status", return_value=ready), \
+             mock.patch.object(stdio, "_stop_daemon") as stop, \
+             mock.patch.object(stdio, "_spawn_daemon") as spawn:
+            with self.assertRaisesRegex(RuntimeError, "newer; restart"):
+                stdio.ensure_daemon()
+            stop.assert_not_called()
+            spawn.assert_not_called()
+
+    def test_old_daemon_is_stopped_then_respawned(self) -> None:
+        health_calls = {"n": 0}
+        stop_calls = {"n": 0}
+        spawn_calls = {"n": 0}
+
+        def health() -> dict | None:
+            health_calls["n"] += 1
+            if health_calls["n"] == 1:
+                return {"ok": True, "role": "doma-bridge-daemon"}  # outdated: no authRequired
+            if health_calls["n"] == 2:
+                return None  # after stop
+            return {"ok": True, "role": "doma-bridge-daemon", "authRequired": True, "version": stdio.SERVER_VERSION}
+
+        original_health = stdio._health_status
+        original_stop = stdio._stop_daemon
+        original_spawn = stdio._spawn_daemon
+        try:
+            stdio._health_status = health
+            stdio._stop_daemon = lambda: stop_calls.__setitem__("n", stop_calls["n"] + 1)
+            stdio._spawn_daemon = lambda: spawn_calls.__setitem__("n", spawn_calls["n"] + 1)
+            stdio.ensure_daemon()
+            self.assertEqual(stop_calls["n"], 1)
+            self.assertEqual(spawn_calls["n"], 1)
+        finally:
+            stdio._health_status = original_health
+            stdio._stop_daemon = original_stop
+            stdio._spawn_daemon = original_spawn
+
+    def test_old_daemon_raises_if_stop_fails(self) -> None:
+        original_health = stdio._health_status
+        original_stop = stdio._stop_daemon
         try:
             stdio._health_status = lambda: {"ok": True, "role": "doma-bridge-daemon"}
-            with self.assertRaisesRegex(RuntimeError, "outdated"):
+            stdio._stop_daemon = lambda: None
+            with self.assertRaisesRegex(RuntimeError, "could not be stopped"):
                 stdio.ensure_daemon()
         finally:
-            stdio._health_status = original
+            stdio._health_status = original_health
+            stdio._stop_daemon = original_stop
 
 
 if __name__ == "__main__":

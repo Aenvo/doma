@@ -671,7 +671,11 @@
       }
     }
 
-    handleMove(e) {
+    /**
+     * @param {MouseEvent|TouchEvent|{clientX:number,clientY:number}} e
+     * @param {{ force?: boolean }} [opts] force：触摸换选时跳过 enterThreshold
+     */
+    handleMove(e, opts = {}) {
       this.lastPointerX = e.clientX;
       this.lastPointerY = e.clientY;
       const el = this.getElementFromPoint(e.clientX, e.clientY);
@@ -680,8 +684,8 @@
       const rect = this.getHighlightRect(el);
       if (!rect) return;
 
-      // 增强的防抖逻辑：只有变化明显才切换
-      if (this.state.currentRect) {
+      // 增强的防抖逻辑：只有变化明显才切换（触摸强制换选除外）
+      if (!opts.force && this.state.currentRect) {
         const dx = Math.abs(rect.left - this.state.currentRect.left);
         const dy = Math.abs(rect.top - this.state.currentRect.top);
 
@@ -875,10 +879,40 @@
       console.log("onIframeClick, iframeEl.src : ", iframeEl.src);
     }
 
+    /** 手机 / iPad 等主指针为触摸（无 hover）；桌面（含触控板）仍走 hover 逻辑 */
+    isTouchPrimary() {
+      try {
+        return window.matchMedia("(hover: none) and (pointer: coarse)").matches;
+      } catch (_) {
+        return false;
+      }
+    }
+
     targetOnClick(e){
-      if (!this.state.start || this.state.paused) return;
+      if (!this.state.start) return;
       if (this.actionBar?.contains(e.target)) return;
-      if (!this.state.currentEl) return;
+
+      // 触摸屏：已选中（paused）后点其他元素直接换选，无需先取消
+      if (this.state.paused) {
+        if (!this.isTouchPrimary()) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const prevEl = this.state.currentEl;
+        this.handleMove(e, { force: true });
+        if (!this.state.currentEl || this.state.currentEl === prevEl) return;
+        const nextRect = this.getHighlightRect(this.state.currentEl)
+          || this.state.currentEl.getBoundingClientRect();
+        this.handleSelectArea();
+        this.showActionBarForRect(nextRect);
+        return;
+      }
+
+      if (!this.state.currentEl) {
+        // 触摸无 hover：首次点击用坐标命中再确认
+        if (!this.isTouchPrimary()) return;
+        this.handleMove(e, { force: true });
+        if (!this.state.currentEl) return;
+      }
 
       const rect = this.getHighlightRect(this.state.currentEl)
         || this.state.currentEl.getBoundingClientRect();
@@ -890,7 +924,19 @@
         e.clientY <= rect.bottom
       );
 
-      if (!isInside) return;
+      // 触摸：点在当前高亮外也按新坐标换选并确认
+      if (!isInside) {
+        if (!this.isTouchPrimary()) return;
+        this.handleMove(e, { force: true });
+        if (!this.state.currentEl) return;
+        const nextRect = this.getHighlightRect(this.state.currentEl)
+          || this.state.currentEl.getBoundingClientRect();
+        e.preventDefault();
+        e.stopPropagation();
+        this.handleSelectArea();
+        this.showActionBarForRect(nextRect);
+        return;
+      }
 
       e.preventDefault();
       e.stopPropagation();
@@ -1079,13 +1125,43 @@
       }
     }
   }
+  /** Safari 页内壳已注入时走 panelShell，与 handleSelect 同路（勿 runtime 广播） */
+  const hasSafariPanelShell = () => {
+    try {
+      return !!(
+        window.__DOMA_SAFARI_PANEL_SHELL__ ||
+        document.getElementById("doma-safari-panel-host")
+      );
+    } catch (_) {
+      return false;
+    }
+  };
+
   const syncTaggleSelectStatus = () => {
+    if (hasSafariPanelShell()) {
+      try {
+        window.dispatchEvent(new CustomEvent("doma-close-capture"));
+      } catch (_) {
+        /* ignore */
+      }
+      return;
+    }
     context.browser.runtime.sendMessage({
       origin: 'content',
       operate: 'closeCapture',
     });
   }
   const sendSelectorMessage = (data) => {
+    if (hasSafariPanelShell()) {
+      try {
+        window.dispatchEvent(
+          new CustomEvent("doma-page-select-result", { detail: data }),
+        );
+      } catch (_) {
+        /* ignore */
+      }
+      return;
+    }
     context.browser.runtime.sendMessage({
       origin: 'content',
       operate: 'pageSelectResult',
@@ -1093,23 +1169,31 @@
     });
   }
 
+  const applyHandleSelect = (taggle) => {
+    if (taggle) {
+      if (!SelectCaptrue.getInstance().state.start) {
+        SelectCaptrue.getInstance().state.start = true;
+        SelectCaptrue.getInstance().taggleSelect();
+        console.log("select.captrue taggleSelect------");
+      }
+    } else {
+      SelectCaptrue.getInstance().closeSelect();
+    }
+  };
+
   if(window == window.top){
     context.browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // console.log("select.captrue onMessage : ", message);
       const {operate, origin, taggle} = message;
       if (operate === "handleSelect") {
-        if (taggle) {
-          if(!SelectCaptrue.getInstance().state.start){
-            SelectCaptrue.getInstance().state.start = true;
-            SelectCaptrue.getInstance().taggleSelect();
-            
-            console.log("select.captrue taggleSelect------");
-          }
-        } else {
-          SelectCaptrue.getInstance().closeSelect();
-        }
+        applyHandleSelect(!!taggle);
       }
       
+    });
+    // Safari：panelShell 中转（iframe postMessage → CustomEvent），与 runtime.onMessage 等价
+    window.addEventListener("doma-handle-select", (event) => {
+      const taggle = !!(event && event.detail && event.detail.taggle);
+      applyHandleSelect(taggle);
     });
   }else{
     window.addEventListener("message", (event) => {

@@ -113,6 +113,26 @@ try {
     assert.equal(applied.length, 1);
     assert.deepEqual(buckets(), { ...fixed, conversationText: 626, conversationImage: 0, total: 1001 });
   });
+  await check('Anthropic cancellation settles known usage once without a successful done event', async () => {
+    usage.armTurnUsageFixed(id, fixed);
+    const controller = new AbortController();
+    let cancelled = 0;
+    const body = event('message_start', { message: { usage: { input_tokens: 1000, output_tokens: 1 } } }) +
+      event('content_block_delta', { index: 0, delta: { type: 'text_delta', text: 'partial' } });
+    globalThis.fetch = async () => new Response(new ReadableStream({
+      start(c) { c.enqueue(encoder.encode(body)); },
+      cancel() { cancelled++; },
+    }));
+    const events: string[] = [];
+    for await (const e of usage.fetchAnthropicSSE('https://example.test', {}, 'cancelled-message', controller.signal)) {
+      events.push(e.type);
+      if (e.type === 'text') controller.abort();
+      if (e.type === 'usage') usage.applyLlmUsage(id, e.usage);
+    }
+    assert.deepEqual(events, ['text', 'usage']);
+    assert.equal(cancelled, 1);
+    assert.deepEqual(buckets(), { ...fixed, conversationText: 626, conversationImage: 0, total: 1001 });
+  });
   await check('Anthropic error frames and reader failures settle known usage once while preserving the error', async () => {
     const observed = [];
     for (const failure of ['error-frame', 'reader-failure']) {

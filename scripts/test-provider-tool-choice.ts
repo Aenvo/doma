@@ -142,6 +142,7 @@ try {
       [{ thinking: { type: 'disabled' } }, 'max_tokens', 4096],
       [{ reasoning_effort: 'none' }, 'max_tokens', 4096],
       [{ max_tokens: 1234 }, 'max_tokens', 1234],
+      [{ max_completion_tokens: 2048 }, 'max_completion_tokens', 2048],
       [{ max_tokens: 9999, max_completion_tokens: 2048 }, 'max_completion_tokens', 2048],
     ] as const) {
       const body = await bodyFor(compatible('https://api.deepseek.com/v1', 'deepseek-flash', extraBody), true);

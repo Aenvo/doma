@@ -235,6 +235,23 @@ try {
     assert.equal(usages.at(-1)?.usage?.totalTokens, 19);
     assert.equal(events.at(-1)?.completed, true);
   });
+
+  await check('Anthropic cumulative usage settles before tools and includes final output tokens', async () => {
+    globalThis.fetch = async () => streamResponse([
+      'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":12,"output_tokens":1}}}\n\n',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call-usage","name":"read"}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":7}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]).response;
+    const events = await collect(fetchAnthropicSSE('https://example.test', {}, 'usage-tools'));
+    assert.deepEqual(events.map((event) => event.type), ['usage', 'tool_call', 'done']);
+    assert.equal(events[0].usage?.promptTokens, 12);
+    assert.equal(events[0].usage?.completionTokens, 7);
+    assert.equal(events[0].usage?.totalTokens, 19);
+    assert.equal(events[1].toolCalls?.[0].id, 'call-usage');
+  });
+
   console.log(`SSE fetcher regression checks passed (${checks})`);
 } finally {
   globalThis.fetch = originalFetch;
