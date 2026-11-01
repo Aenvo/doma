@@ -38,7 +38,7 @@ from xml.sax.saxutils import escape as xml_escape
 
 from bridge_auth import load_or_create_token
 
-SERVER_VERSION = "0.7.14"
+SERVER_VERSION = "0.7.15"
 BRIDGE_PROTOCOL_VERSION = 1
 CONTROL_PORT = int(os.environ.get("DOMA_CONTROL_PORT", "3846"))
 BRIDGE_PORT = int(os.environ.get("DOMA_BRIDGE_PORT", "3847"))
@@ -394,26 +394,23 @@ def _register_client_hello(client: Any, data: dict[str, Any]) -> None:
                 _TASKS[active_cid] = rec
 
 
-def _bind_conversation(request_id: str, conversation_id: str) -> None:
+def _bind_conversation(request_id: str, conversation_id: str) -> bool:
     rid = request_id.strip()
     cid = conversation_id.strip()
     if not rid or not cid:
-        return
+        return False
     with _TASKS_LOCK:
         req = _REQUESTS.get(rid)
-        if not req:
-            return
+        if not req or req.get("status") in ("done", "error", "needs_user_input"):
+            return False
         existing = req.get("conversationId")
         if isinstance(existing, str) and existing.strip() and existing.strip() != cid:
             print(
                 f"[daemon] request {rid} already bound to {existing}, ignore {cid}",
                 file=sys.stderr,
             )
-            return
+            return False
         now = time.time()
-        req["conversationId"] = cid
-        if req.get("status") in ("done", "error", "needs_user_input"):
-            return
         if req.get("operation") == "close":
             current = _TASKS.get(cid)
             if current and current.get("requestId") not in (rid, req.get("previousRequestId")):
@@ -421,7 +418,8 @@ def _bind_conversation(request_id: str, conversation_id: str) -> None:
                 event = req.get("event")
                 if isinstance(event, threading.Event):
                     event.set()
-                return
+                return False
+        req["conversationId"] = cid
         req["status"] = "running"
         req["text"] = "DomA 已创建会话并开始执行"
         req["updatedAt"] = now
@@ -444,15 +442,19 @@ def _bind_conversation(request_id: str, conversation_id: str) -> None:
         event = None if req.get("operation") == "close" else req.get("event")
     if isinstance(event, threading.Event):
         event.set()
+    return True
 
 
-def _fail_request(request_id: str, text: str) -> bool:
+def _fail_request(request_id: str, text: str, *, unbound_only: bool = False) -> bool:
     rid = request_id.strip()
     if not rid:
         return False
     with _TASKS_LOCK:
         req = _REQUESTS.get(rid)
-        if not req or req.get("status") in ("done", "error", "needs_user_input"):
+        if unbound_only and req and not req.get("conversationId") and req.get("status") == "error":
+            return True  # ACK a retried creation error without rewriting its first terminal result.
+        if (not req or req.get("status") in ("done", "error", "needs_user_input")
+                or (unbound_only and req.get("conversationId"))):
             return False
         req["status"] = "error"
         req["ok"] = False
@@ -467,6 +469,7 @@ def _fail_request(request_id: str, text: str) -> bool:
                 rec.update(status="error", ok=False, text=text, updatedAt=time.time())
     if isinstance(event, threading.Event):
         event.set()
+    print(f"[daemon] request failed request={rid}: {json.dumps(text, ensure_ascii=True)}", file=sys.stderr)
     return True
 
 
@@ -486,6 +489,15 @@ def _resolve_conversation_id(msg: dict[str, Any]) -> Optional[str]:
                 if isinstance(existing, str) and existing.strip():
                     return existing.strip()
     return None
+
+
+def _session_creation_failure(request_id: str, text: str, caller: str) -> dict[str, Any]:
+    _fail_request(request_id, text)
+    with _TASKS_LOCK:
+        req = _REQUESTS.get(request_id) or {}
+        target = {key: req[key] for key in ("targetTitle", "targetUrl") if key in req}
+    return _payload(False, text, requestId=request_id, status="error", callerAgent=caller,
+                    bridgeConnected=_extension_connected(), **target)
 
 
 def set_direct_control_mode(
@@ -608,6 +620,11 @@ def dispatch_to_doma(
     }
     if conversation_id:
         payload["conversationId"] = conversation_id
+    if msg_type in ("task", "directSession"):
+        with _TASKS_LOCK:
+            req = _REQUESTS.get(request_id)
+            if req:
+                payload["expiresAt"] = (req["createdAt"] + BIND_TIMEOUT_SEC) * 1000
     if "tabId" in target:
         payload["targetTabId"] = target["tabId"]
         payload["targetUrl"] = target["url"]
@@ -749,14 +766,8 @@ def start_direct_session(
             )
 
         if not event.wait(BIND_TIMEOUT_SEC):
-            _fail_request(request_id, "等待 DomA 创建直控会话超时")
-            return _payload(
-                False,
-                "等待 DomA 创建直控会话超时（侧栏未打开或 startGroupSession 失败）",
-                status="error",
-                callerAgent=caller,
-                bridgeConnected=True,
-            )
+            return _session_creation_failure(request_id,
+                "等待 DomA 创建直控会话确认超时（请求已发送，但未收到 accepted 或创建错误回包）", caller)
 
         with _TASKS_LOCK:
             req = _REQUESTS.get(request_id) or {}
@@ -765,13 +776,7 @@ def start_direct_session(
             status = str(req.get("status") or "pending")
 
         if not isinstance(cid, str) or not cid.strip():
-            return _payload(
-                False,
-                str(err or "扩展未返回 conversationId"),
-                status="error",
-                callerAgent=caller,
-                bridgeConnected=True,
-            )
+            return _session_creation_failure(request_id, str(err or "扩展未返回 conversationId"), caller)
 
         cid = cid.strip()
         return _payload(
@@ -988,14 +993,8 @@ def start_group_conversation(
             )
 
         if not event.wait(BIND_TIMEOUT_SEC):
-            _fail_request(request_id, "等待 DomA 创建会话超时")
-            return _payload(
-                False,
-                "等待 DomA 创建会话超时（侧栏未打开或 startGroupSession 失败）",
-                status="error",
-                callerAgent=caller,
-                bridgeConnected=True,
-            )
+            return _session_creation_failure(request_id,
+                "等待 DomA 创建会话确认超时（请求已发送，但未收到 accepted 或创建错误回包）", caller)
 
         with _TASKS_LOCK:
             req = _REQUESTS.get(request_id) or {}
@@ -1006,13 +1005,7 @@ def start_group_conversation(
             target_url = req.get("targetUrl")
 
         if not isinstance(cid, str) or not cid.strip():
-            return _payload(
-                False,
-                str(err or "扩展未返回 conversationId"),
-                status="error",
-                callerAgent=caller,
-                bridgeConnected=True,
-            )
+            return _session_creation_failure(request_id, str(err or "扩展未返回 conversationId"), caller)
 
         cid = cid.strip()
         if status in ("done", "error", "needs_user_input"):
@@ -1330,6 +1323,14 @@ def _apply_extension_result(msg: dict[str, Any]) -> bool:
     if status in ("done", "needs_user_input") and not text.strip() and not msg.get("artifacts"):
         status, ok, text = "error", False, "DomA 未返回可消费的最终结果"
 
+    # A creation failure belongs to the new request. Older panels may attach
+    # their selected history ID before accepted; that must not hide the error
+    # or overwrite the preceding conversation's result.
+    rid = msg.get("requestId")
+    if (status == "error" and isinstance(rid, str)
+            and _fail_request(rid, text or "DomA 创建会话失败", unbound_only=True)):
+        return True
+
     cid = _resolve_conversation_id(msg)
     if cid:
         rid = msg.get("requestId") if isinstance(msg.get("requestId"), str) else None
@@ -1557,7 +1558,8 @@ class BridgeWSHandler(BaseHTTPRequestHandler):
                     cid = data.get("conversationId")
                     if isinstance(rid, str) and isinstance(cid, str):
                         with _CLIENTS_LOCK:
-                            correct_client = _REQUEST_CLIENTS.get(rid) is self
+                            correct_client = (_REQUEST_CLIENTS.get(rid) is self
+                                              and _bind_conversation(rid, cid))
                             if correct_client:
                                 _CONVERSATION_CLIENTS[cid] = self
                                 tab_id = (_CLIENT_META.get(self) or {}).get("tabId")
@@ -1565,7 +1567,6 @@ class BridgeWSHandler(BaseHTTPRequestHandler):
                                     _CONVERSATION_TAB_IDS[cid] = tab_id
                         if not correct_client:
                             continue
-                        _bind_conversation(rid, cid)
                         print(
                             f"[daemon] bound request={rid} conversationId={cid}",
                             file=sys.stderr,

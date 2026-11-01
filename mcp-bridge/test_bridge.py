@@ -247,6 +247,88 @@ class BridgeConversationRecoveryTests(unittest.TestCase):
         self.assertEqual(daemon.get_conversation_result("same-tab")["text"], "previous final")
         self.assertEqual(current.messages, [])
 
+    def test_creation_error_with_selected_history_id_wakes_the_new_request(self) -> None:
+        for direct in (False, True):
+            for history_exists in (False, True):
+                with self.subTest(direct=direct, history_exists=history_exists):
+                    daemon._TASKS.pop("selected-history", None)
+                    client = self.Client()
+                    self.hello(client, 7)
+                    if history_exists:
+                        self.saved("selected-history", client, 7)
+
+                    def fail_creation(raw):
+                        message = json.loads(raw)
+                        self.assertGreater(message["expiresAt"], time.time() * 1000)
+                        result = {"type": "result", "requestId": message["requestId"],
+                                  "conversationId": "selected-history", "status": "error",
+                                  "ok": False, "text": "fixture: target tab disappeared"}
+                        self.assertTrue(daemon._accept_panel_result(client, result))
+                        self.assertTrue(daemon._accept_panel_result(client, result), "retry must be ACKed")
+
+                    client.send_text = fail_creation
+                    with mock.patch.object(daemon, "_DIRECT_CONTROL", direct), \
+                         mock.patch.object(daemon, "BIND_TIMEOUT_SEC", 1):
+                        start = daemon.start_direct_session if direct else daemon.start_group_conversation
+                        result = start("只读中文任务\n验证错误回包", caller_agent="Codex")
+                    self.assertEqual(result["text"], "fixture: target tab disappeared")
+                    self.assertEqual(result["status"], "error")
+                    self.assertTrue(result["requestId"])
+                    self.assertNotIn("conversationId", result)
+                    request = daemon._REQUESTS[result["requestId"]]
+                    self.assertTrue(request["event"].is_set())
+                    self.assertIsNone(request["conversationId"])
+                    if history_exists:
+                        self.assertEqual(daemon._TASKS["selected-history"]["text"], "previous final")
+
+    def test_creation_timeout_retains_identity_and_rejects_late_binding(self) -> None:
+        for direct in (False, True):
+            with self.subTest(direct=direct):
+                client = self.Client()
+                self.hello(client, 7)
+                with mock.patch.object(daemon, "_DIRECT_CONTROL", direct), \
+                     mock.patch.object(daemon, "BIND_TIMEOUT_SEC", 0.001):
+                    start = daemon.start_direct_session if direct else daemon.start_group_conversation
+                    result = start("fixture no reply", caller_agent="Codex")
+                self.assertEqual(result["status"], "error")
+                self.assertTrue(result["bridgeConnected"])
+                self.assertEqual(result["targetUrl"], "https://example.com/current")
+                rid = result["requestId"]
+                self.assertEqual(daemon._REQUESTS[rid]["status"], "error")
+                self.assertFalse(daemon._bind_conversation(rid, "late-conversation"))
+                self.assertIsNone(daemon._REQUESTS[rid]["conversationId"])
+                self.assertNotIn("late-conversation", daemon._TASKS)
+                self.assertNotIn(rid, daemon._REQUEST_TO_CONVERSATION)
+
+    def test_websocket_accepted_installs_routes_only_for_an_active_request(self) -> None:
+        for status in ("pending", "error"):
+            with self.subTest(status=status):
+                rid, cid = f"ws-{status}", f"conversation-{status}"
+                handler = object.__new__(daemon.BridgeWSHandler)
+                handler.headers = {"Host": f"127.0.0.1:{daemon.BRIDGE_PORT}",
+                                   "Origin": "chrome-extension://abcdefghijklmnopabcdefghijklmnop",
+                                   "Upgrade": "websocket", "Sec-WebSocket-Key": "fixture-key"}
+                handler.path, handler.rfile = "/", io.BytesIO()
+                handler.send_response = lambda *_args: None
+                handler.send_header = lambda *_args: None
+                handler.end_headers = lambda: None
+                handler.send_text = lambda _message: None
+                daemon._REQUEST_CLIENTS[rid] = handler
+                daemon._REQUESTS[rid] = {"requestId": rid, "conversationId": None,
+                    "status": status, "createdAt": time.time(), "event": threading.Event()}
+                messages = [json.dumps({"type": "hello", "tabId": 7}),
+                            json.dumps({"type": "accepted", "requestId": rid, "conversationId": cid}), None]
+                with mock.patch.object(daemon, "_ws_recv_text", side_effect=messages):
+                    handler.do_GET()
+                if status == "pending":
+                    self.assertIs(daemon._CONVERSATION_CLIENTS[cid], handler)
+                    self.assertEqual(daemon._CONVERSATION_TAB_IDS[cid], 7)
+                    self.assertEqual(daemon._REQUESTS[rid]["conversationId"], cid)
+                else:
+                    self.assertNotIn(cid, daemon._CONVERSATION_CLIENTS)
+                    self.assertNotIn(cid, daemon._CONVERSATION_TAB_IDS)
+                    self.assertIsNone(daemon._REQUESTS[rid]["conversationId"])
+
     def test_explicit_cid_restores_offline_owner_on_new_tab_or_without_saved_tab(self) -> None:
         for old_tab_id in (7, None):
             with self.subTest(old_tab_id=old_tab_id):

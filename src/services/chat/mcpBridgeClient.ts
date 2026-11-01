@@ -37,6 +37,7 @@ export type McpBridgeTaskMessage = {
   targetUrl?: string;
   callerAgent?: string;
   attachments?: unknown[];
+  expiresAt?: number;
 };
 
 /** Follow-up message into an existing DomA conversation. */
@@ -67,6 +68,7 @@ export type McpBridgeDirectSessionMessage = {
   targetTabId?: number;
   targetUrl?: string;
   callerAgent?: string;
+  expiresAt?: number;
 };
 
 /** Direct-control: run one browser tool in the extension (no DomA LLM). */

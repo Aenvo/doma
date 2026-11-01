@@ -1787,6 +1787,7 @@ const mcpExternalTaskQueue: Array<{
   attachments: unknown[];
   targetTabId?: number;
   targetUrl?: string;
+  expiresAt?: number;
 }> = [];
 let chatPanelReadyForMcp = false;
 
@@ -1883,6 +1884,12 @@ async function ingestMcpAttachments(rawList: unknown[]): Promise<UserAttachedFil
   return out;
 }
 
+function assertMcpSessionRequestActive(expiresAt?: number): void {
+  if (expiresAt != null && Date.now() >= expiresAt) {
+    throw new Error("MCP 创建会话请求已超时，请重新发起任务");
+  }
+}
+
 async function processMcpExternalTask(payload: {
   requestId: string;
   sendText: string;
@@ -1890,39 +1897,42 @@ async function processMcpExternalTask(payload: {
   attachments?: unknown[];
   targetTabId?: number;
   targetUrl?: string;
+  expiresAt?: number;
 }): Promise<void> {
   const { requestId, callerAgent } = payload;
-  // 块内仅 Agent 名；instruction 必须在 interactionBlock 外
-  let sendText = normalizeMcpExternalSendText(payload.sendText, callerAgent);
-
-  const files = await ingestMcpAttachments(
-    Array.isArray(payload.attachments) ? payload.attachments : [],
-  );
-  if (files.length) {
-    sendText = formatUserMessageForModel({ files, body: sendText });
-  }
-
-  const instruction = sendText
-    .replace(/<interactionBlock>[\s\S]*?<\/interactionBlock>/gi, "")
-    .trim();
-  console.log("[ChatPanel] processMcpExternalTask", {
-    requestId,
-    callerAgent,
-    attachmentCount: files.length,
-    sendText,
-    instruction,
-  });
-  if (!instruction) {
-    reportMcpExternalResult({
-      requestId,
-      ok: false,
-      text: "MCP 任务缺少 instruction",
-      status: "error",
-    });
-    return;
-  }
-
+  let cid: string | undefined;
   try {
+    assertMcpSessionRequestActive(payload.expiresAt);
+    // 块内仅 Agent 名；instruction 必须在 interactionBlock 外
+    let sendText = normalizeMcpExternalSendText(payload.sendText, callerAgent);
+
+    const files = await ingestMcpAttachments(
+      Array.isArray(payload.attachments) ? payload.attachments : [],
+    );
+    if (files.length) {
+      sendText = formatUserMessageForModel({ files, body: sendText });
+    }
+
+    const instruction = sendText
+      .replace(/<interactionBlock>[\s\S]*?<\/interactionBlock>/gi, "")
+      .trim();
+    console.log("[ChatPanel] processMcpExternalTask", {
+      requestId,
+      callerAgent,
+      attachmentCount: files.length,
+      sendText,
+      instruction,
+    });
+    if (!instruction) {
+      reportMcpExternalResult({
+        requestId,
+        ok: false,
+        text: "MCP 任务缺少 instruction",
+        status: "error",
+      });
+      return;
+    }
+
     if (payload.targetTabId != null && payload.targetTabId !== panelHostTabId) {
       throw new Error("MCP 指定网页与当前 DomA 侧栏不匹配，请在目标网页重新打开侧栏");
     }
@@ -1932,9 +1942,10 @@ async function processMcpExternalTask(payload: {
         throw new Error("目标网页已跳转，请重新发起任务并确认网页");
       }
     }
-    await startGroupSession(payload.targetTabId);
-    // conversationId 由 startGroupSession 生成；MCP 返回的必须是这个 id
-    const cid = conversationId.value;
+    // Bind only the ID returned by this creation attempt, never the selected history.
+    assertMcpSessionRequestActive(payload.expiresAt);
+    cid = await startGroupSession(payload.targetTabId, true, payload.expiresAt);
+    assertMcpSessionRequestActive(payload.expiresAt);
     if (!cid) {
       reportMcpExternalResult({
         requestId,
@@ -1971,7 +1982,7 @@ async function processMcpExternalTask(payload: {
   } catch (e) {
     reportMcpExternalResult({
       requestId,
-      conversationId: conversationId.value || undefined,
+      conversationId: cid,
       ok: false,
       text: e instanceof Error ? e.message : String(e),
       status: "error",
@@ -1986,6 +1997,7 @@ function handleMcpExternalTaskMessage(message: {
   attachments?: unknown;
   targetTabId?: unknown;
   targetUrl?: unknown;
+  expiresAt?: number;
 }): { ok: boolean; error?: string; queued?: boolean } {
   const requestId = typeof message.requestId === "string" ? message.requestId.trim() : "";
   const rawSend = typeof message.sendText === "string" ? message.sendText.trim() : "";
@@ -2002,7 +2014,7 @@ function handleMcpExternalTaskMessage(message: {
     ? message.targetTabId
     : undefined;
   const targetUrl = typeof message.targetUrl === "string" ? message.targetUrl : undefined;
-  const item = { requestId, sendText, callerAgent, attachments, targetTabId, targetUrl };
+  const item = { requestId, sendText, callerAgent, attachments, targetTabId, targetUrl, expiresAt: message.expiresAt };
 
   if (!chatPanelReadyForMcp) {
     mcpExternalTaskQueue.push(item);
@@ -2023,24 +2035,27 @@ async function processMcpDirectSession(payload: {
   targetTabId?: number;
   targetUrl?: string;
   callerAgent: string;
+  expiresAt?: number;
 }): Promise<void> {
   const { requestId, callerAgent } = payload;
-  let sendText = normalizeMcpExternalSendText(payload.sendText, callerAgent);
-  const instruction = sendText
-    .replace(/<interactionBlock>[\s\S]*?<\/interactionBlock>/gi, "")
-    .trim();
-  const statusBody = t("chat.mcp.directSessionStatus", {
-    task: instruction || payload.sendText.trim() || "…",
-  });
-  sendText = normalizeMcpExternalSendText(statusBody, callerAgent);
-
-  console.log("[ChatPanel] processMcpDirectSession", {
-    requestId,
-    callerAgent,
-    statusBody,
-  });
-
+  let cid: string | undefined;
   try {
+    assertMcpSessionRequestActive(payload.expiresAt);
+    let sendText = normalizeMcpExternalSendText(payload.sendText, callerAgent);
+    const instruction = sendText
+      .replace(/<interactionBlock>[\s\S]*?<\/interactionBlock>/gi, "")
+      .trim();
+    const statusBody = t("chat.mcp.directSessionStatus", {
+      task: instruction || payload.sendText.trim() || "…",
+    });
+    sendText = normalizeMcpExternalSendText(statusBody, callerAgent);
+
+    console.log("[ChatPanel] processMcpDirectSession", {
+      requestId,
+      callerAgent,
+      statusBody,
+    });
+
     if (payload.targetTabId != null && payload.targetTabId !== panelHostTabId) {
       throw new Error("MCP 指定网页与当前 DomA 侧栏不匹配，请在目标网页重新打开侧栏");
     }
@@ -2048,8 +2063,9 @@ async function processMcpDirectSession(payload: {
       const current = await getContext().browser.tabs.get(payload.targetTabId);
       if (current.url !== payload.targetUrl) throw new Error("目标网页已跳转，请重新确认网页");
     }
-    await startGroupSession(payload.targetTabId);
-    const cid = conversationId.value;
+    assertMcpSessionRequestActive(payload.expiresAt);
+    cid = await startGroupSession(payload.targetTabId, true, payload.expiresAt);
+    assertMcpSessionRequestActive(payload.expiresAt);
     if (!cid) {
       reportMcpExternalResult({
         requestId,
@@ -2066,7 +2082,7 @@ async function processMcpDirectSession(payload: {
   } catch (e) {
     reportMcpExternalResult({
       requestId,
-      conversationId: conversationId.value || undefined,
+      conversationId: cid,
       ok: false,
       text: e instanceof Error ? e.message : String(e),
       status: "error",
@@ -3147,6 +3163,7 @@ function onMcpBridgeInbound(msg: McpBridgeInboundMessage) {
   }
   if (msg.type === "directSession") {
     void processMcpDirectSession({
+      expiresAt: msg.expiresAt,
       targetTabId: msg.targetTabId,
       targetUrl: msg.targetUrl,
       requestId: msg.requestId,
@@ -3166,6 +3183,7 @@ function onMcpBridgeInbound(msg: McpBridgeInboundMessage) {
     return;
   }
   handleMcpExternalTaskMessage({
+    expiresAt: msg.expiresAt,
     requestId: msg.requestId,
     sendText: msg.sendText,
     callerAgent: msg.callerAgent,
@@ -7232,7 +7250,7 @@ function formatDomATabGroupTitle(raw: string): string {
   return `${DOMA_TAB_GROUP_TITLE_PREFIX}${title}`;
 }
 
-async function startGroupSession(sourceTabId?: number) {
+async function startGroupSession(sourceTabId?: number, throwOnError = false, expiresAt?: number) {
   try {
     const browser = getContext().browser;
     // MCP tasks start on the explicitly selected page. Manual/scheduled tasks retain their own new-tab flow.
@@ -7252,9 +7270,10 @@ async function startGroupSession(sourceTabId?: number) {
       });
     }
     const newTabId = typeof newTab?.id === 'number' ? newTab.id : undefined;
-    if (newTabId == null) return;
+    if (newTabId == null) throw new Error("DomA 未能获取新会话的目标标签页");
 
     // Create the task group around the selected page (or the manual new tab).
+    assertMcpSessionRequestActive(expiresAt);
     const groupId = await new Promise<number>((resolve, reject) => {
       browser.tabs.group({ tabIds: [newTabId] }, (gid: number) => {
         if (browser.runtime.lastError) {
@@ -7305,6 +7324,7 @@ async function startGroupSession(sourceTabId?: number) {
     return newConvId;
   } catch (e) {
     console.error('[Chat] Failed to start group session:', e);
+    if (throwOnError) throw e;
   }
 }
 
