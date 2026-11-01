@@ -510,7 +510,7 @@ class ChatStorageService {
   }
 
   /** Atomically preserve terminal turns and reject stale request/context identities. */
-  async markMcpTurnInterrupted(id: string, requestId: string, executionContextId: string, summary: string): Promise<boolean> {
+  async markMcpTurnInterrupted(id: string, requestId: string, executionContextId: string, summary: string, closedTargetTabIds?: number[]): Promise<boolean> {
     if (!requestId || !executionContextId) return false;
     const db = await this.ensureDb();
     return new Promise((resolve, reject) => {
@@ -525,7 +525,8 @@ class ChatStorageService {
         const turn = raw as Record<string, unknown>;
         if (turn.status !== 'running' || turn.requestId !== requestId || turn.executionContextId !== executionContextId
             || turn.requestConversationId !== row.conversationId) return;
-        store.put({ ...row, toolInput: { ...row.toolInput, mcpTurn: { ...turn, status: 'error', summary, interruptionResultPending: true } } });
+        store.put({ ...row, toolInput: { ...row.toolInput, mcpTurn: { ...turn, status: 'error', summary, interruptionResultPending: true,
+          ...(closedTargetTabIds ? { closedTargetTabIds: [...closedTargetTabIds] } : {}) } } });
         changed = true;
       };
       tx.oncomplete = () => resolve(changed);

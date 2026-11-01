@@ -427,6 +427,25 @@ try {
     invalidAck.stopMcpBridgeClient();
     saved.delete(outboxKey("invalid-ack"));
   }
+  // Closed-target evidence belongs to the terminal receipt, never to a hello claim.
+  const orphan = await loadPanel();
+  orphan.setMcpBridgePanelContext({ tabId: 22, url: "https://example.com/other" });
+  orphan.setMcpBridgeActiveConversation("orphan-conv", { conversationId: "orphan-conv", mode: "group", groupId: 5, groupTabs: [11] });
+  orphan.startMcpBridgeClient(() => {}, [3847]); await tick();
+  const orphanAck = orphan.sendMcpBridgeResult({ requestId: "orphan-rid", conversationId: "orphan-conv",
+    status: "error", ok: false, text: "target closed", closedTargetTabIds: [11] });
+  await tick();
+  let orphanSocket = FakeWebSocket.sockets.at(-1)!;
+  assert.equal(orphanSocket.sent.find((message) => message.type === "hello").activeConversationId, undefined);
+  assert.deepEqual(orphanSocket.sent.find((message) => message.type === "result").closedTargetTabIds, [11]);
+  assert.deepEqual(JSON.parse(saved.get(outboxKey("orphan-rid"))!).message.closedTargetTabIds, [11]);
+  orphan.reconnectMcpBridgeClient(); await tick();
+  orphanSocket = FakeWebSocket.sockets.at(-1)!;
+  assert.deepEqual(orphanSocket.sent.find((message) => message.type === "result").closedTargetTabIds, [11]);
+  orphanSocket.receive({ type: "result_ack", resultId: "orphan-rid" });
+  assert.equal(await orphanAck, true); assert.equal(saved.has(outboxKey("orphan-rid")), false);
+  orphan.stopMcpBridgeClient();
+
   console.log("MCP result ACK, reconnect, multi-panel persistence, migration, TTL, ownership and read-only terminal recovery probe passed");
 } finally {
   Date.now = originalNow;

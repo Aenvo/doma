@@ -1,6 +1,7 @@
 // Run: node --import tsx scripts/test-mcp-execution-identity.ts
 import assert from "node:assert/strict";
 import {
+  getMcpClosedTargetTabIds,
   decideMcpExecutionRecovery,
   getMcpExecutionContextId,
   getMcpExecutionContextState,
@@ -125,6 +126,20 @@ await check("already terminal turns are preserved and malformed statuses are not
   for (const status of [undefined, null, "", "pending", "running ", true]) {
     assert.equal(decideMcpExecutionRecovery({ ...running, status }), "unknown");
   }
+});
+
+await check("closed target proof requires a live viewer, complete tab query and no surviving group", async () => {
+  const context = { mode: "group", groupId: 3, groupTabs: [11], groupWorkingTabId: 11 };
+  const query = (value: unknown) => ({ query: async () => value });
+  assert.deepEqual(await getMcpClosedTargetTabIds(query([{ id: 22 }]), context, 22), [11]);
+  for (const live of [null, {}, [], [{ id: 11 }], [{ id: 22 }, { id: 11 }], [{ id: 22 }, { id: 33, groupId: 3 }], [{ id: 22 }, {}]]) {
+    assert.equal(await getMcpClosedTargetTabIds(query(live), context, 22), undefined);
+  }
+  for (const invalid of [undefined, { mode: "group", groupTabs: [11] }, { mode: "group", groupId: 3, groupTabs: [] }, { ...context, groupTabs: [NaN] }]) {
+    assert.equal(await getMcpClosedTargetTabIds(query([{ id: 22 }]), invalid, 22), undefined);
+  }
+  assert.deepEqual(await getMcpClosedTargetTabIds(query([{ id: 22 }]), { mode: "single", tabId: 11 }, 22), [11]);
+  assert.equal(await getMcpClosedTargetTabIds({ query: async () => { throw new Error("API failed"); } }, context, 22), undefined);
 });
 
 console.log(`MCP execution identity: ${checks} checks passed`);

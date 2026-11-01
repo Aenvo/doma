@@ -968,7 +968,7 @@ import { buildZipBlob, triggerBlobDownload } from "@/services/chat/extensionZip"
 import { normalizeMcpExternalSendText } from "@/services/chat/mcpExternalSend";
 import { notePanelActivity, pingServiceWorker, logIdleDiag } from "@/services/chat/swIdleDiag";
 import { assembleMcpTurnResult, type McpTurnResult } from "@/services/chat/mcpResult";
-import { decideMcpExecutionRecovery, getMcpExecutionContextId, getMcpExecutionContextState } from "@/services/chat/mcpExecutionIdentity";
+import { getMcpClosedTargetTabIds, decideMcpExecutionRecovery, getMcpExecutionContextId, getMcpExecutionContextState } from "@/services/chat/mcpExecutionIdentity";
 import {
   DOMA_CLI_BRIDGE_PORT,
   DOMA_MCP_BRIDGE_PORT,
@@ -1958,7 +1958,7 @@ async function processMcpExternalTask(payload: {
     const targetTab = await getContext().browser.tabs.get(payload.targetTabId ?? panelHostTabId! ).catch(() => null);
     const executionContextId = await getMcpExecutionContextId(getContext().browser.runtime, window.location.href);
     const mcpUserMessageId = await addMessage(cid, "user", sendText, undefined, {
-      mcpTurn: { callerAgent, requestId, requestConversationId: cid, executionContextId, targetTitle: targetTab?.title || "", targetUrl: payload.targetUrl || targetTab?.url || "", status: "running" },
+      mcpTurn: { callerAgent, requestId, requestConversationId: cid, executionContextId, targetContext: mcpTurnTargetContext(cid), targetTitle: targetTab?.title || "", targetUrl: payload.targetUrl || targetTab?.url || "", status: "running" },
     });
     await send2(sendText, {
       conversationId: cid,
@@ -2224,7 +2224,7 @@ async function processMcpExternalMessage(payload: {
     const targetUrl = await resolveCurrentConversationUrl().catch(() => "");
     const executionContextId = await getMcpExecutionContextId(getContext().browser.runtime, window.location.href);
     const mcpUserMessageId = await addMessage(targetConversationId, "user", sendText, undefined, {
-      mcpTurn: { callerAgent, requestId, requestConversationId: targetConversationId, executionContextId, targetUrl, status: "running" },
+      mcpTurn: { callerAgent, requestId, requestConversationId: targetConversationId, executionContextId, targetContext: mcpTurnTargetContext(targetConversationId), targetUrl, status: "running" },
     });
     await send2(sendText, {
       conversationId: targetConversationId,
@@ -5611,7 +5611,15 @@ async function persistMcpTurnStatus(messageId: string, result: StoredMcpTurnResu
   return turn.terminalResultPending as StoredMcpTurnResult;
 }
 
+function mcpTurnTargetContext(convId: string) {
+  const context = getConversationContext(convId);
+  if (!context) return undefined;
+  return { mode: context.mode, tabId: context.tabId, groupId: context.groupId,
+    groupTabs: context.groupTabs ? [...context.groupTabs] : undefined, groupWorkingTabId: context.groupWorkingTabId };
+}
+
 const recoveringMcpConversations = new Set<string>();
+const MCP_TARGET_CLOSED_NOTICE = "原会话的目标标签页已关闭，上一轮执行中断；历史记录仍保留。请确认目标网页后重新发起任务，当前网页不会接管执行。";
 const MCP_INTERRUPTED_NOTICE = "侧栏已重建，上一轮执行中断；已保存内容仍保留。请明确重试。";
 /** Terminal receipts do not require owner-loss inference or reconstruction from transcript text. */
 function queueSavedMcpTurnResult(user: StoredMessage): void {
@@ -5639,7 +5647,8 @@ function queueInterruptedMcpTurnResult(user: StoredMessage, savedOutput: StoredM
   // Startup must not wait for a bridge that is initialized only after loadConversation.
   void reportMcpExternalResult({
     conversationId: convId, requestId, ok: false, status: "error",
-    text: MCP_INTERRUPTED_NOTICE + (partial ? `\n\n未完成的已保存结果：\n${partial.text}` : ""),
+    ...(Array.isArray(turn.closedTargetTabIds) ? { closedTargetTabIds: turn.closedTargetTabIds as number[] } : {}),
+    text: (typeof turn.summary === "string" ? turn.summary : MCP_INTERRUPTED_NOTICE) + (partial ? `\n\n未完成的已保存结果：\n${partial.text}` : ""),
     ...(partial ? { sources: partial.sources, artifacts: partial.artifacts } : {}),
   }).then((acknowledged) => {
     if (acknowledged) return chatStorage.clearMcpTurnInterruptionResult(user.id, requestId, convId);
@@ -5647,19 +5656,33 @@ function queueInterruptedMcpTurnResult(user: StoredMessage, savedOutput: StoredM
 }
 /** A disconnected socket is insufficient: only browser-proven owner loss ends a precise request. */
 async function recoverInterruptedMcpTurn(convId: string): Promise<void> {
-  const context = getConversationContext(convId);
+  // Tab/group removal can retire the live context before history is opened.
+  // The request's immutable browser identity is a fallback, never a new binding.
+  let context = getConversationContext(convId);
+  if (!context) {
+    try {
+      const rows = await chatStorage.getMessagesByConversation(convId);
+      const turn = rows.findLast((row) => row.role === "user")?.toolInput?.mcpTurn as Record<string, unknown> | undefined;
+      if (turn?.requestConversationId === convId && turn.targetContext && typeof turn.targetContext === "object") {
+        context = { ...(turn.targetContext as ReturnType<typeof mcpTurnTargetContext>), conversationId: convId } as typeof context;
+      }
+    } catch { return; }
+  }
   const ownsPanelTab = panelHostTabId != null && context && (
     context.mode === "single" ? context.tabId === panelHostTabId :
       context.mode === "group" && context.groupId != null && Number.isInteger(context.groupId) && context.groupId >= 0
         && Array.isArray(context.groupTabs) && context.groupTabs.includes(panelHostTabId)
   );
-  if (!ownsPanelTab) return;
+  const closedTargetTabIds = ownsPanelTab ? undefined : await getMcpClosedTargetTabIds(
+    getContext().browser.tabs, context, panelHostTabId,
+  );
+  if (!ownsPanelTab && !closedTargetTabIds) return;
   if (recoveringMcpConversations.has(convId)) return;
   recoveringMcpConversations.add(convId);
   try {
     const rows = await chatStorage.getMessagesByConversation(convId);
     for (const row of rows) {
-      if (row.role === "user") queueSavedMcpTurnResult(row);
+      if (ownsPanelTab && row.role === "user") queueSavedMcpTurnResult(row);
     }
     if (isConversationLoading(convId) || abortControllersByConversation.has(convId)) return;
     const userIndex = rows.findLastIndex((row) => row.role === "user");
@@ -5673,6 +5696,7 @@ async function recoverInterruptedMcpTurn(convId: string): Promise<void> {
     const executionContextId = turn.executionContextId;
     if (hasPendingMcpTerminalResult(requestId, convId)) return;
     if (turn.status === "error" && turn.interruptionResultPending === true) {
+      if (!ownsPanelTab && JSON.stringify(turn.closedTargetTabIds) !== JSON.stringify(closedTargetTabIds)) return;
       queueInterruptedMcpTurnResult(user, rows.slice(userIndex + 1));
       return;
     }
@@ -5684,16 +5708,23 @@ async function recoverInterruptedMcpTurn(convId: string): Promise<void> {
       hasPendingTerminalResult: hasPendingMcpTerminalResult(requestId, convId),
     });
     if (decision !== "interrupted") return;
+    if (!ownsPanelTab) {
+      const rechecked = await getMcpClosedTargetTabIds(getContext().browser.tabs, getConversationContext(convId) ?? context, panelHostTabId);
+      if (JSON.stringify(rechecked) !== JSON.stringify(closedTargetTabIds)) return;
+    }
     // Recheck after the browser query; a terminal result or a newer user turn wins.
     const latestRows = await chatStorage.getMessagesByConversation(convId);
     const latestUser = latestRows.findLast((row) => row.role === "user");
     if (latestUser?.id !== user.id || isConversationLoading(convId) || abortControllersByConversation.has(convId)
         || hasPendingMcpTerminalResult(requestId, convId)) return;
-    const marked = await chatStorage.markMcpTurnInterrupted(user.id, requestId, executionContextId, MCP_INTERRUPTED_NOTICE);
+    const notice = closedTargetTabIds ? MCP_TARGET_CLOSED_NOTICE : MCP_INTERRUPTED_NOTICE;
+    const marked = await chatStorage.markMcpTurnInterrupted(user.id, requestId, executionContextId, notice, closedTargetTabIds);
     if (!marked) return;
     const savedOutput = latestRows.slice(latestRows.indexOf(latestUser) + 1);
     // Queue the terminal result before cosmetic cleanup; never wait for startup's bridge ACK here.
-    queueInterruptedMcpTurnResult(user, savedOutput);
+    queueInterruptedMcpTurnResult({ ...user, toolInput: { ...user.toolInput, mcpTurn: {
+      ...turn, summary: notice, ...(closedTargetTabIds ? { closedTargetTabIds } : {}),
+    } } }, savedOutput);
     for (const row of savedOutput) {
       if (row.activityTrace?.status !== "running") continue;
       const trace = cloneTurnActivityTrace(row.activityTrace);
@@ -6153,6 +6184,7 @@ function reportMcpExternalResult(payload: {
   ok: boolean;
   text: string;
   status: "done" | "error" | "needs_user_input";
+  closedTargetTabIds?: number[];
   sources?: string[];
   artifacts?: Array<Record<string, string>>;
 }): Promise<boolean> {

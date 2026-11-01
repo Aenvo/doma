@@ -74,3 +74,28 @@ export function decideMcpExecutionRecovery(input: {
       input.hasController !== false || input.hasPendingTerminalResult !== false) return "unknown";
   return input.ownerContextState === "missing" ? "interrupted" : "unknown";
 }
+
+/** A history viewer may reconcile a lost target, but must never become its executor. */
+export async function getMcpClosedTargetTabIds(
+  tabs: { query?: (filter: Record<string, unknown>) => Promise<unknown> } | undefined,
+  context: { mode?: string; tabId?: number; groupId?: number; groupTabs?: number[]; groupWorkingTabId?: number } | undefined,
+  viewerTabId: number | undefined,
+): Promise<number[] | undefined> {
+  if (!context || !Number.isInteger(viewerTabId) || viewerTabId! <= 0 || typeof tabs?.query !== "function") return;
+  const validId = (id: unknown): id is number => typeof id === "number" && Number.isInteger(id) && id > 0;
+  let ids: number[];
+  if (context.mode === "single" && validId(context.tabId)) ids = [context.tabId];
+  else if (context.mode === "group" && Number.isInteger(context.groupId) && context.groupId! >= 0
+      && Array.isArray(context.groupTabs) && context.groupTabs.every(validId)
+      && (context.groupWorkingTabId == null || validId(context.groupWorkingTabId))) {
+    ids = [...new Set([...context.groupTabs, ...(context.groupWorkingTabId == null ? [] : [context.groupWorkingTabId])])];
+  } else return;
+  if (!ids.length || ids.includes(viewerTabId!)) return;
+  try {
+    const live = await tabs.query({});
+    if (!Array.isArray(live) || !live.every((tab) => isContext(tab) && validId(tab.id))
+        || !live.some((tab) => tab.id === viewerTabId)
+        || live.some((tab) => ids.includes(tab.id) || (context.mode === "group" && tab.groupId === context.groupId))) return;
+    return ids.sort((a, b) => a - b);
+  } catch { return; }
+}

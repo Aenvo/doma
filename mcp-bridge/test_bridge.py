@@ -705,6 +705,37 @@ class BridgeProtocolTests(unittest.TestCase):
                 send_frame({**message, "text": "duplicate"})
                 self.assertEqual(receive_frame(), {"type": "result_ack", "resultId": rid})
                 self.assertEqual(daemon.get_conversation_result(cid)["text"], "中文完成")
+
+                # Restore history on another live page after the original tab/renderer is gone.
+                orphan_cid, orphan_rid = "test-ws-closed-target", "test-ws-orphan-turn"
+                send_frame({"type": "hello", "tabId": 22, "title": "Other page", "url": "https://example.com/other"})
+                with daemon._CLIENTS_LOCK:
+                    lost_owner = object()
+                    daemon._CONVERSATION_CLIENTS[orphan_cid] = lost_owner
+                    daemon._CONVERSATION_TAB_IDS[orphan_cid] = 11
+                with daemon._TASKS_LOCK:
+                    daemon._TASKS[orphan_cid] = {"conversationId": orphan_cid, "requestId": orphan_rid,
+                        "status": "running", "createdAt": time.time(), "targetUrl": "https://example.com/original"}
+                    daemon._REQUESTS[orphan_rid] = {"conversationId": orphan_cid, "requestId": orphan_rid, "status": "running"}
+                    daemon._REQUEST_TO_CONVERSATION[orphan_rid] = orphan_cid
+                interrupted = {"type": "result", "conversationId": orphan_cid, "requestId": orphan_rid, "resultId": orphan_rid,
+                    "status": "error", "ok": False, "text": "目标标签页已关闭", "closedTargetTabIds": [11]}
+                send_frame(interrupted)
+                self.assertEqual(receive_frame(), {"type": "result_ack", "resultId": orphan_rid})
+                send_frame(interrupted)
+                self.assertEqual(receive_frame(), {"type": "result_ack", "resultId": orphan_rid})
+                result = daemon.get_conversation_result(orphan_cid)
+                self.assertEqual(result["status"], "error")
+                self.assertTrue(result["bridgeConnected"])
+                self.assertFalse(result["conversationConnected"])
+                self.assertEqual(result["expectedTabId"], 11)
+                self.assertEqual(result["targetUrl"], "https://example.com/original")
+                self.assertEqual(daemon._REQUESTS[orphan_rid]["status"], "error")
+                followup = daemon.send_conversation_message(orphan_cid, "continue")
+                self.assertEqual(followup["status"], "error")
+                self.assertNotIn("当前回合仍在执行", followup["text"])
+                self.assertEqual(daemon._TASKS[orphan_cid]["requestId"], orphan_rid)
+                self.assertIs(daemon._CONVERSATION_CLIENTS[orphan_cid], lost_owner)
         finally:
             server.shutdown()
             server.server_close()

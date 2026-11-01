@@ -98,6 +98,7 @@ export type McpBridgeOutboundMessage =
       ok: boolean;
       text: string;
       status: "done" | "error" | "needs_user_input";
+      closedTargetTabIds?: number[];
       sources?: string[];
       artifacts?: Array<Record<string, string>>;
     }
@@ -505,6 +506,7 @@ export function sendMcpBridgeResult(payload: {
   ok: boolean;
   text: string;
   status: "done" | "error" | "needs_user_input";
+  closedTargetTabIds?: number[];
   sources?: string[];
   artifacts?: Array<Record<string, string>>;
 }): Promise<boolean> {
@@ -523,6 +525,7 @@ export function sendMcpBridgeResult(payload: {
     ok: payload.ok,
     text: payload.text,
     status: payload.status,
+    ...(payload.closedTargetTabIds ? { closedTargetTabIds: payload.closedTargetTabIds } : {}),
     ...(payload.sources ? { sources: payload.sources } : {}),
     ...(payload.artifacts ? { artifacts: payload.artifacts } : {}),
   };

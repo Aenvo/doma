@@ -7,7 +7,7 @@ import { transform } from "esbuild";
 import * as ts from "typescript";
 import { assembleMcpTurnResult } from "../src/services/chat/mcpResult.ts";
 import { cloneTurnActivityTrace, finishTurnActivityTrace } from "../src/services/chat/activityTrace.ts";
-import { decideMcpExecutionRecovery, getMcpExecutionContextState } from "../src/services/chat/mcpExecutionIdentity.ts";
+import { getMcpClosedTargetTabIds, decideMcpExecutionRecovery, getMcpExecutionContextState } from "../src/services/chat/mcpExecutionIdentity.ts";
 
 const panelText = readFileSync("src/components/chat/ChatPanel.vue", "utf8");
 const scriptStart = panelText.indexOf('<script setup lang="ts">');
@@ -43,7 +43,7 @@ const reportCode = (await transform([
   nestedPanelVariable("reportMcpOnce"), "this.reportOnce = reportMcpOnce;",
 ].join("\n"), { loader: "ts", target: "es2022" })).code;
 const panelCode = (await transform([
-  panelVariable("recoveringMcpConversations"), panelVariable("MCP_INTERRUPTED_NOTICE"),
+  panelVariable("recoveringMcpConversations"), panelVariable("MCP_INTERRUPTED_NOTICE"), panelVariable("MCP_TARGET_CLOSED_NOTICE"),
   panelFunction("queueSavedMcpTurnResult"), panelFunction("queueInterruptedMcpTurnResult"), panelFunction("recoverInterruptedMcpTurn"),
   "this.recover = recoverInterruptedMcpTurn; this.queueResult = queueInterruptedMcpTurnResult; this.recovering = recoveringMcpConversations;",
 ].join("\n"), { loader: "ts", target: "es2022" })).code;
@@ -125,6 +125,7 @@ function makeStorage(initialRows: any[]) {
 function makePanel(initialRows = [runningUser()]) {
   const db = makeStorage(initialRows);
   const fixture: any = { loading: false, ownerContexts: [], ownerQueryError: undefined, beforeOwnerReply: undefined,
+    tabs: [{ id: hostTab, groupId: -1 }], tabQueries: 0, tabQueryError: undefined, beforeTabReply: undefined,
     ownerQueries: 0, reports: [], outbox: new Set<string>(), warnings: [], clearCalls: [], context: { conversationId: cid, mode: "single", tabId: hostTab },
     ack: () => Promise.resolve(true) };
   const runtime = { async getContexts(filter: any) {
@@ -137,14 +138,19 @@ function makePanel(initialRows = [runningUser()]) {
     panelHostTabId: hostTab, conversationId: { value: cid }, chatStorage: db.storage,
     abortControllersByConversation: new Map(),
     getConversationContext: (convId: string) => convId === fixture.context?.conversationId ? fixture.context : undefined,
-    getContext: () => ({ browser: { runtime } }),
+    getContext: () => ({ browser: { runtime, tabs: { async query(filter: any) {
+      assert.deepEqual(filter, {}); fixture.tabQueries++;
+      await fixture.beforeTabReply?.();
+      if (fixture.tabQueryError) throw fixture.tabQueryError;
+      return fixture.tabs;
+    } } } }),
     isConversationLoading: () => fixture.loading,
     hasPendingMcpTerminalResult: (requestId: string, convId: string) => fixture.outbox.has(`${requestId}:${convId}`),
     getPendingMcpTerminalResultAck: () => fixture.ack(),
     reportMcpExternalResult: (payload: any) => { fixture.reports.push(copy(payload)); return fixture.ack(); },
     getMessageById: (id: string) => fixture.panelMessages.get(id),
     clearDoingToolCallsInIdb: async (ids: string[]) => { fixture.clearCalls.push([...ids]); },
-    getMcpExecutionContextState, decideMcpExecutionRecovery, assembleMcpTurnResult,
+    getMcpClosedTargetTabIds, getMcpExecutionContextState, decideMcpExecutionRecovery, assembleMcpTurnResult,
     cloneTurnActivityTrace, finishTurnActivityTrace,
     console: { warn: (...args: any[]) => fixture.warnings.push(args) },
   };
@@ -408,6 +414,110 @@ await check("parallel recovery calls share one running check without duplicate i
   const first = panel.recover(); await settle();
   await panel.recover(); assert.equal(panel.fixture.ownerQueries, 1);
   release(); await first; await settle(); assert.equal(panel.fixture.reports.length, 1);
+});
+
+function closedGroupPanel() {
+  const panel = makePanel([runningUser(), publicOutput()]);
+  panel.fixture.context = { conversationId: cid, mode: "group", groupId: 5, groupTabs: [27], groupWorkingTabId: 27 };
+  panel.fixture.ack = () => new Promise(() => {});
+  return panel;
+}
+
+await check("closed original group restored as history finishes the precise turn without binding the viewer", async () => {
+  const panel = closedGroupPanel(); const beforeContext = copy(panel.fixture.context);
+  await bounded(panel.recover());
+  const stored = turn(panel.db.rows.get("user-1"));
+  assert.equal(stored.status, "error"); assert.equal(stored.interruptionResultPending, true);
+  assert.deepEqual(stored.closedTargetTabIds, [27]);
+  assert.deepEqual(panel.fixture.context, beforeContext); assert.equal(panel.state.panelHostTabId, hostTab);
+  assert.equal(panel.fixture.reports.length, 1); const result = panel.fixture.reports[0];
+  assert.equal(result.requestId, rid); assert.equal(result.conversationId, cid);
+  assert.equal(result.status, "error"); assert.deepEqual(result.closedTargetTabIds, [27]);
+  assert.match(result.text, /目标标签页已关闭/); assert.match(result.text, /当前网页不会接管执行/);
+  assert.match(result.text, /已保存的正文/); assert.equal(panel.fixture.tabQueries, 2);
+});
+
+await check("request target snapshot survives removal of the live group context", async () => {
+  const panel = closedGroupPanel();
+  turn(panel.db.rows.get("user-1")).targetContext = copy(panel.fixture.context);
+  panel.fixture.context = undefined;
+  await panel.recover();
+  assert.equal(turn(panel.db.rows.get("user-1")).status, "error");
+  assert.deepEqual(panel.fixture.reports[0].closedTargetTabIds, [27]);
+  assert.equal(panel.fixture.context, undefined);
+});
+
+await check("new controller, user or terminal outbox during the final target query wins", async () => {
+  for (const change of ["controller", "user", "outbox", "terminal"]) {
+    const panel = closedGroupPanel();
+    panel.fixture.beforeTabReply = () => {
+      if (panel.fixture.tabQueries !== 2) return;
+      if (change === "controller") panel.state.abortControllersByConversation.set(cid, new AbortController());
+      if (change === "user") panel.db.rows.set("new-user", runningUser({ id: "new-user", timestamp: 4 }));
+      if (change === "outbox") panel.fixture.outbox.add(`${rid}:${cid}`);
+      if (change === "terminal") turn(panel.db.rows.get("user-1")).status = "done";
+    };
+    await panel.recover(); assert.equal(panel.db.fixture.writes, 0, change); assert.equal(panel.fixture.reports.length, 0, change);
+  }
+});
+
+await check("actual group picker loads closed-target history without creating or rebinding a tab", async () => {
+  const panel = closedGroupPanel();
+  const activated: number[] = [], loaded: string[] = [];
+  const tabs = { query: async () => panel.fixture.tabs, async update(id: number) {
+    activated.push(id); throw new Error("No tab with id");
+  } };
+  panel.state.getContext = () => ({ browser: { runtime: { getContexts: async () => [] }, tabs } });
+  panel.state.loadConversation = async (id: string) => { loaded.push(id); await panel.state.recover(id); };
+  panel.state.refreshConversationContextList = async () => {};
+  const code = (await transform(panelFunction("switchToConversation") + "\nthis.switchTo = switchToConversation;", { loader: "ts", target: "es2022" })).code;
+  runInNewContext(code, panel.state);
+  await panel.state.switchTo(cid);
+  assert.deepEqual(activated, [27]); assert.deepEqual(loaded, [cid]);
+  assert.equal(turn(panel.db.rows.get("user-1")).status, "error");
+  assert.deepEqual(panel.fixture.context.groupTabs, [27]);
+});
+
+await check("an intact target, surviving group member or live execution owner cannot be interrupted by a viewer", async () => {
+  for (const mode of ["target-present", "group-member", "unknown-tabs", "query-error", "owner-present", "owner-unknown", "controller", "outbox"]) {
+    const panel = closedGroupPanel();
+    if (mode === "target-present") panel.fixture.tabs.push({ id: 27, groupId: 5 });
+    if (mode === "group-member") panel.fixture.tabs.push({ id: 28, groupId: 5 });
+    if (mode === "unknown-tabs") panel.fixture.tabs = [{ id: hostTab }, {}];
+    if (mode === "query-error") panel.fixture.tabQueryError = new Error("browser unavailable");
+    if (mode === "owner-present") panel.fixture.ownerContexts = [{ contextId: ownerId, contextType: "SIDE_PANEL" }];
+    if (mode === "owner-unknown") panel.fixture.ownerQueryError = new Error("unsupported");
+    if (mode === "controller") panel.state.abortControllersByConversation.set(cid, new AbortController());
+    if (mode === "outbox") panel.fixture.outbox.add(`${rid}:${cid}`);
+    await panel.recover();
+    assert.equal(panel.db.fixture.writes, 0, mode); assert.equal(panel.fixture.reports.length, 0, mode);
+    assert.equal(turn(panel.db.rows.get("user-1")).status, "running", mode);
+  }
+});
+
+await check("target or group reappearing during owner verification prevents stale interruption", async () => {
+  for (const change of ["target", "group", "context", "new-request"]) {
+    const panel = closedGroupPanel();
+    panel.fixture.beforeOwnerReply = () => {
+      if (change === "target") panel.fixture.tabs.push({ id: 27 });
+      if (change === "group") panel.fixture.tabs.push({ id: 28, groupId: 5 });
+      if (change === "context") panel.fixture.context.groupTabs = [28];
+      if (change === "new-request") turn(panel.db.rows.get("user-1")).requestId = "newer";
+    };
+    await panel.recover(); assert.equal(panel.db.fixture.writes, 0, change); assert.equal(panel.fixture.reports.length, 0, change);
+  }
+});
+
+await check("closed-target interruption receipt survives renderer destruction and keeps proof until ACK", async () => {
+  const first = closedGroupPanel(); await first.recover();
+  const reloaded = makePanel([...first.db.rows.values()]); reloaded.fixture.context = copy(first.fixture.context);
+  reloaded.fixture.ownerQueryError = new Error("API unavailable after durable interruption");
+  await reloaded.recover(); await settle();
+  assert.equal(reloaded.fixture.ownerQueries, 0); assert.equal(reloaded.fixture.reports.length, 1);
+  assert.deepEqual(reloaded.fixture.reports[0].closedTargetTabIds, [27]);
+  assert.match(reloaded.fixture.reports[0].text, /目标标签页已关闭/);
+  assert.equal(turn(reloaded.db.rows.get("user-1")).interruptionResultPending, false);
+  assert.equal(turn(reloaded.db.rows.get("user-1")).status, "error");
 });
 
 await check("partial result assembly excludes process reasoning, tool payloads and user text", async () => {

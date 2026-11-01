@@ -1,11 +1,11 @@
 {
-  "version": "0.7.13",
+  "version": "0.7.14",
   "minManagerVersion": "1.1.2",
   "bridgeProtocolVersion": 1,
   "sha256": {
     "bridge_auth.py": "9ab662c3dee66c3f5fbfc1e95bb7b9bf2f31fabcc8d056ab67fa69d23abf7098",
-    "doma_mcp_stdio.py": "ab49eb12975044110634e42e5167a53634bc2c874f6f39b85ab9fa7cfbffd4fb",
-    "doma_bridge_daemon.py": "6c33180736f4edf086db98801b011aec22ea8da31d8cee5d0e74d3ce08ece143"
+    "doma_mcp_stdio.py": "1e9ae4209e86c0c23489c6ddbfb002c53e72ca33cce5f4e99b1a6677f356c6b7",
+    "doma_bridge_daemon.py": "d9053d1a87cb6bb8626f05be0bc42785926e1d192ff30ddfb7f637f48a7ba4b1"
   },
   "managerSha256": "4d8f5f142a746aa14932dbf0d2d2af03f144819a397961939dd12d6a4bddfd9d"
 }

@@ -38,7 +38,7 @@ from xml.sax.saxutils import escape as xml_escape
 
 from bridge_auth import load_or_create_token
 
-SERVER_VERSION = "0.7.13"
+SERVER_VERSION = "0.7.14"
 BRIDGE_PROTOCOL_VERSION = 1
 CONTROL_PORT = int(os.environ.get("DOMA_CONTROL_PORT", "3846"))
 BRIDGE_PORT = int(os.environ.get("DOMA_BRIDGE_PORT", "3847"))
@@ -1053,6 +1053,9 @@ def send_conversation_message(
         if current.get("status") in ("pending", "running"):
             return _payload(False, "当前回合仍在执行，请先轮询结果", conversationId=cid,
                             requestId=current.get("requestId"), status="running", **connection)
+        if current.get("closedTargetTabIds") and not connection["conversationConnected"]:
+            return _payload(False, "原会话没有可用的目标侧栏。请确认目标网页并打开对应侧栏；原标签页已关闭时请重新发起任务。",
+                            conversationId=cid, requestId=current.get("requestId"), status="error", **connection)
     normalized: list[dict[str, Any]] = []
     if attachments is not None:
         if not isinstance(attachments, list):
@@ -1345,7 +1348,8 @@ def _apply_extension_result(msg: dict[str, Any]) -> bool:
             return True
         _update_task(cid, expected_request_id=expected_request_id, status=status, ok=ok, text=text,
                      sources=msg.get("sources") if isinstance(msg.get("sources"), list) else [],
-                     artifacts=msg.get("artifacts") if isinstance(msg.get("artifacts"), list) else [])
+                     artifacts=msg.get("artifacts") if isinstance(msg.get("artifacts"), list) else [],
+                     **({"closedTargetTabIds": msg["closedTargetTabIds"]} if status == "error" and isinstance(msg.get("closedTargetTabIds"), list) else {}))
         return True
 
     rid = msg.get("requestId")
@@ -1353,6 +1357,35 @@ def _apply_extension_result(msg: dict[str, Any]) -> bool:
         _fail_request(rid.strip(), text or "DomA 执行失败")
         return True
     return False
+
+
+def _accept_panel_result(client: Any, data: dict[str, Any]) -> bool:
+    """Reconcile an orphaned request without granting the history viewer an execution route."""
+    cid = _resolve_conversation_id(data)
+    rid = data.get("requestId")
+    with _CLIENTS_LOCK:
+        if ((cid and _CONVERSATION_CLIENTS.get(cid) is client)
+                or (isinstance(rid, str) and _REQUEST_CLIENTS.get(rid) is client)):
+            return _apply_extension_result(data)
+        # Only the extension's browser-verified closed-target interruption can
+        # cross a panel boundary. A disconnected bridge alone is not proof.
+        closed = data.get("closedTargetTabIds")
+        tab_id = (_CLIENT_META.get(client) or {}).get("tabId")
+        if (client not in _CLIENTS or type(tab_id) is not int or tab_id <= 0
+                or not isinstance(cid, str) or not isinstance(rid, str) or not rid
+                or data.get("status") != "error" or data.get("ok") is not False
+                or not isinstance(data.get("text"), str) or not data["text"].strip()
+                or not isinstance(closed, list) or not closed
+                or not all(type(value) is int and value > 0 for value in closed)
+                or tab_id in closed or _CONVERSATION_TAB_IDS.get(cid) not in closed
+                or _conversation_client_locked(cid) is not None):
+            return False
+        with _TASKS_LOCK:
+            task = _TASKS.get(cid)
+            if not task or task.get("requestId") != rid or _REQUEST_TO_CONVERSATION.get(rid) != cid:
+                return False
+            # Existing terminal results win; ACK retries without rewriting them.
+        return _apply_extension_result(data)
 
 
 # ---------- WebSocket ----------
@@ -1540,14 +1573,7 @@ class BridgeWSHandler(BaseHTTPRequestHandler):
                 elif typ == "running":
                     _apply_extension_result({**data, "status": "running"})
                 elif typ == "result":
-                    cid = _resolve_conversation_id(data)
-                    rid = data.get("requestId")
-                    with _CLIENTS_LOCK:
-                        authorized = bool(
-                            (cid and _CONVERSATION_CLIENTS.get(cid) is self)
-                            or (isinstance(rid, str) and _REQUEST_CLIENTS.get(rid) is self)
-                        )
-                    if authorized and _apply_extension_result(data):
+                    if _accept_panel_result(self, data):
                         result_id = data.get("resultId")
                         if isinstance(result_id, str) and result_id:
                             self.send_text(json.dumps({"type": "result_ack", "resultId": result_id}))
