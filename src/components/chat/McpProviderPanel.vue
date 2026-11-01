@@ -91,6 +91,25 @@
         </button>
       </div>
 
+      <div class="mcp-toggle-row">
+        <div class="mcp-toggle-copy">
+          <div class="mcp-toggle-title">{{ t("chat.mcp.directToggle") }}</div>
+          <p class="mcp-toggle-hint">{{ t("chat.mcp.directToggleHint") }}</p>
+        </div>
+        <button
+          type="button"
+          class="mcp-switch"
+          :class="{ on: directEnabled }"
+          role="switch"
+          :aria-checked="directEnabled"
+          :disabled="toggleBusy || !bridgeEnabled"
+          :title="t('chat.mcp.directToggle')"
+          @click="toggleDirectEnabled"
+        >
+          <span class="mcp-switch-knob" aria-hidden="true" />
+        </button>
+      </div>
+
       <div class="mcp-status-row">
         <span class="mcp-status-dot" :class="{ on: bridgeConnected, off: !bridgeEnabled }" />
         <span class="mcp-status-text">
@@ -153,8 +172,10 @@ import { classifyMcpManagerError, type McpManagerFailure } from "@/services/chat
 import {
   hasMcpBridgeCopyHintShown,
   isMcpBridgeEnabled,
+  isMcpDirectControlEnabled,
   markMcpBridgeCopyHintShown,
   setMcpBridgeEnabled,
+  setMcpDirectControlEnabled,
 } from "@/services/chat/mcpBridgePrefs";
 import { isMcpBridgeConnected, DOMA_MCP_BRIDGE_PORT } from "@/services/chat/mcpBridgeClient";
 
@@ -164,6 +185,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: "bridge-enabled-change", enabled: boolean): void;
+  (e: "direct-control-change", enabled: boolean): void;
   (e: "bridge-ensure"): void;
 }>();
 
@@ -193,6 +215,7 @@ const installCommand = !supportsNativeManager
   : `bash ./install-doma-mcp.sh '${extensionId}'`;
 
 const bridgeEnabled = ref(false);
+const directEnabled = ref(false);
 const bridgeConnected = ref(false);
 const agentCount = ref<number | null>(null);
 const toggleBusy = ref(false);
@@ -259,11 +282,15 @@ function managerFailureMessage(failure: McpManagerFailure): string {
 async function loadEnabled() {
   try {
     bridgeEnabled.value = await isMcpBridgeEnabled();
+    directEnabled.value = await isMcpDirectControlEnabled();
     emit("bridge-enabled-change", bridgeEnabled.value);
+    emit("direct-control-change", directEnabled.value);
   } catch (e) {
     console.warn("[McpPanel] getEnabled failed", e);
     bridgeEnabled.value = false;
+    directEnabled.value = false;
     emit("bridge-enabled-change", false);
+    emit("direct-control-change", false);
   }
 }
 
@@ -277,11 +304,27 @@ async function toggleBridgeEnabled() {
     emit("bridge-enabled-change", next);
     if (next) {
       void refreshHealth();
+      emit("direct-control-change", directEnabled.value);
     } else {
       bridgeConnected.value = false;
     }
   } catch (e) {
     console.warn("[McpPanel] setEnabled failed", e);
+  } finally {
+    toggleBusy.value = false;
+  }
+}
+
+async function toggleDirectEnabled() {
+  if (toggleBusy.value || !bridgeEnabled.value) return;
+  toggleBusy.value = true;
+  const next = !directEnabled.value;
+  try {
+    await setMcpDirectControlEnabled(next);
+    directEnabled.value = next;
+    emit("direct-control-change", next);
+  } catch (e) {
+    console.warn("[McpPanel] setDirectControl failed", e);
   } finally {
     toggleBusy.value = false;
   }

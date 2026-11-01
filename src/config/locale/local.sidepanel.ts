@@ -267,6 +267,10 @@ export default {
         agentsConnected: "{count} MCP client instance(s) connected",
         agentsUnknown: "MCP client count unavailable",
         noAgentsHint: "No desktop MCP client is connected. Add the config below to your agent, save and restart it, then open a new chat and actually call a DomA tool to verify that it loaded.",
+        directToggle: "Direct control (Cursor / Claude brain)",
+        directToggleHint:
+          "When on, MCP exposes DomA browser tools and browser_start_direct_session (status bubble only — no DomA model). Turn off to keep the classic start/send/poll flow. Reload DomA MCP in your agent after switching.",
+        directSessionStatus: "Running: {task}",
         installTitle: "1. Install",
         installHintWindows: "Install Python 3.9+, then paste the command below into PowerShell. In the file dialog, select install-doma-mcp.ps1 from this fork's mcp-bridge directory. Your current terminal directory does not matter. When it finishes, click Refresh and follow the panel's next step. Rerun this command if the manager needs repair or the extension ID changes.",
         installHintUnix: "Install Python 3.9+, then open a terminal in this fork's mcp-bridge directory and run the command below. The local script registers the manager for this extension. Return here, click Refresh and follow the panel's next step. Rerun this script if the manager needs repair or the extension ID changes.",
@@ -354,6 +358,14 @@ export default {
         usePopupLabel: "Show a popup",
         usePopupHint: "Checked: open a popup UI. Unchecked: run when the toolbar icon is clicked (no popup).",
         confirm: "Continue",
+        cancel: "Cancel",
+      },
+      safariAiConsent: {
+        title: "AI data sharing",
+        body:
+          "Your current conversation and the page’s accessibility information will be sent to a third-party AI model to perform webpage automation.\n\nThis information is used only for automation you request. Our service does not retain it as stored records or misuse it.",
+        privacyLink: "Privacy Policy",
+        agree: "Agree",
         cancel: "Cancel",
       },
       extensionCard: {
@@ -853,6 +865,10 @@ export default {
         agentsConnected: "已连接 {count} 个 MCP 客户端实例",
         agentsUnknown: "MCP 客户端数量暂不可用",
         noAgentsHint: "尚无桌面 MCP 客户端接入。请把下方配置添加到对应 Agent，保存并重启，再打开新聊天实际调用一个 DomA 工具，验证工具已加载。",
+        directToggle: "直控模式（Cursor / Claude 大脑）",
+        directToggleHint:
+          "开启后，MCP 暴露 DomA 浏览器工具与 browser_start_direct_session（侧栏仅状态气泡，不跑 DomA 模型）。关闭则仍为 start/send/poll 雇工模式。切换后请在桌面 Agent 里刷新 DomA MCP。",
+        directSessionStatus: "正在执行：{task}",
         installTitle: "1. 安装",
         installHintWindows: "先安装 Python 3.9 或更新版本，再把下方命令粘贴到 PowerShell。弹出文件选择框后，从当前 fork 的 mcp-bridge 目录选择 install-doma-mcp.ps1；终端在哪个目录都可以。运行完成后点击「刷新」，按面板显示的下一步继续。若管理器需要修复或扩展 ID 变化，请重跑此命令。",
         installHintUnix: "先安装 Python 3.9 或更新版本，再在当前 fork 的 mcp-bridge 目录打开终端，运行下方本地命令。脚本只为此扩展注册本机管理器；完成后返回这里点击「刷新」，按面板显示的下一步继续。若管理器需要修复或扩展 ID 变化，请重新运行此本地脚本。",
@@ -941,6 +957,14 @@ export default {
         usePopupLabel: "需要弹出 popup",
         usePopupHint: "勾选：点击图标打开弹窗再操作。不勾选：点击工具栏图标直接执行（无弹窗）。",
         confirm: "确定",
+        cancel: "取消",
+      },
+      safariAiConsent: {
+        title: "AI 数据使用同意",
+        body:
+          "当前对话内容以及网页的无障碍信息将被提交给第三方 AI 模型，用于完成网页自动化操作。\n\n这些信息仅用于你发起的自动化任务；我们的服务不会将其作为存档保存，也不会滥用。",
+        privacyLink: "隐私政策",
+        agree: "同意",
         cancel: "取消",
       },
       extensionCard: {

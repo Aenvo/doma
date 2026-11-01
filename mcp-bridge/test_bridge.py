@@ -986,7 +986,8 @@ class BridgeProtocolTests(unittest.TestCase):
             spawn.assert_called_once_with()
 
     def test_newer_daemon_is_preserved_until_client_restart(self) -> None:
-        ready = {"ok": True, "role": "doma-bridge-daemon", "authRequired": True, "version": "0.7.13"}
+        newer = ".".join([*stdio.SERVER_VERSION.split(".")[:-1], str(int(stdio.SERVER_VERSION.split(".")[-1]) + 1)])
+        ready = {"ok": True, "role": "doma-bridge-daemon", "authRequired": True, "version": newer}
         with mock.patch.object(stdio, "_health_status", return_value=ready), \
              mock.patch.object(stdio, "_stop_daemon") as stop, \
              mock.patch.object(stdio, "_spawn_daemon") as spawn:

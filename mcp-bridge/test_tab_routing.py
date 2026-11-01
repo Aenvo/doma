@@ -2,6 +2,7 @@
 
 import json
 import unittest
+from unittest import mock
 
 import doma_bridge_daemon as bridge
 
@@ -82,6 +83,32 @@ class TabRoutingTests(unittest.TestCase):
         )
         self.assertTrue(result["ok"])
         self.assertEqual(len(replacement.sent), 1)
+
+
+    def test_direct_session_uses_the_same_page_selection_contract(self) -> None:
+        ambiguous = bridge.dispatch_to_doma("direct-1", "read", [], "Codex", msg_type="directSession")
+        self.assertEqual(ambiguous["status"], "ambiguous")
+        result = bridge.dispatch_to_doma("direct-2", "read", [], "Codex", msg_type="directSession", target_tab_id=11)
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.first.sent[-1]["targetTabId"], 11)
+        self.assertEqual(self.second.sent, [])
+
+    def test_direct_tool_routes_to_conversation_owner_only(self) -> None:
+        cid = "direct-route-fixture"
+        with bridge._CLIENTS_LOCK:
+            bridge._CONVERSATION_CLIENTS[cid] = self.first
+            bridge._CONVERSATION_TAB_IDS[cid] = 11
+        original = self.first.send_text
+        def complete(raw: str) -> None:
+            original(raw)
+            message = json.loads(raw)
+            bridge._apply_tool_result({"requestId": message["requestId"], "ok": True, "result": "public output"})
+        self.first.send_text = complete
+        with mock.patch.object(bridge, "_DIRECT_CONTROL", True), mock.patch.object(bridge, "_BROWSER_TOOLS", []):
+            result = bridge.call_browser_tool("browser_get_current_tab", {}, cid, "Codex")
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.first.sent[-1]["conversationId"], cid)
+        self.assertEqual(self.second.sent, [])
 
 
 if __name__ == "__main__":
